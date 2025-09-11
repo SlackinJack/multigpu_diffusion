@@ -1,0 +1,8 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+[project]
+name = "multigpu_diffusion"
+description = ""
+version = "0.0.1"
+
