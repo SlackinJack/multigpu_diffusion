@@ -1,6 +1,6 @@
 # multigpu_diffusion
 
-Python Flask hosts for distributed Diffusion inferencing.
+Python Flask hosts for distributed parallel Diffusion inferencing solutions.
 
 ## Model Compatibility Table:
 *Note: This table only indicates what is supported in **this** project - it is not indicative of what is supported in the software being implemented.*
@@ -49,7 +49,7 @@ Python Flask hosts for distributed Diffusion inferencing.
 | variant                       | str        | Torch variant                                      |
 | scheduler                     | str        | Scheduler                                          |
 | quantize_to                   | str        | Quantize the model                                 |
-| model                         | str        | Model path                                         |
+| checkpoint                    | str        | Checkpoint path                                    |
 | gguf_model                    | str        | GGUF model path (usually for the UNet/Transformer) |
 | motion_module                 | str        | Motion module path                                 |
 | motion_adapter                | str        | Motion adapter path                                |

@@ -5,7 +5,9 @@ import os
 import safetensors
 import torch
 import torch._dynamo
+from diffusers.utils import load_image
 from optimum.quanto import freeze, qfloat8, qint2, qint4, qint8, quantize
+from PIL import Image
 
 
 config          = json.load(open(os.path.dirname(os.path.abspath(__file__)) + "/../config.json"))
@@ -21,14 +23,16 @@ GENERIC_HOST_ARGS = {
     "variant":              str,
     "scheduler":            str,
     "quantize_to":          str,
-    "model":                str,    # path
+    "checkpoint":           str,    # path
     "gguf_model":           str,    # path
     "motion_module":        str,    # path
     "motion_adapter":       str,    # path
+    "motion_adapter_lora":  str,    # path
     "control_net":          str,    # path
     "vae":                  str,    # path
     "lora":                 str,    # json dict > { "path": scale, ... }
     "ip_adapter":           str,    # json dict > { "path": scale, ... }
+    "image_scale":          float,
 }
 
 
@@ -61,6 +65,7 @@ def setup_torch_dynamo():
 
 
 def setup_torch_backends():
+    # TODO: config.json
     # TODO: this breaks flux
     #torch.backends.cuda.enable_mem_efficient_sdp(False)
     #torch.backends.cuda.enable_flash_sdp(False)
@@ -121,6 +126,31 @@ def load_lora(lora_dict, pipe, rank, logger, is_quantized):
     logger.info(f'Total loaded LoRAs: {len(loaded_adapters)}')
     logger.info(f'Adapters: {str(loaded_adapters)}')
     return names
+
+
+def load_ip_adapter(pipe, ip_adapter_dict):
+    for m, s in ip_adapter_dict.items():
+        split = m.split("/")
+        ip_adapter_file = split[-1]
+        ip_adapter_subfolder = split[-2]
+        ip_adapter_folder = m.replace(f'/{ip_adapter_subfolder}/{ip_adapter_file}', "")
+        pipe.load_ip_adapter(
+            ip_adapter_folder,
+            subfolder=ip_adapter_subfolder,
+            weight_name=ip_adapter_file,
+            use_safetensors=False, # NOTE: safetensors off
+            local_files_only=True,
+            low_cpu_mem_usage=True,
+        )
+        pipe.set_ip_adapter_scale(s)
+    return
+
+
+def get_warmup_image():
+    # image = load_image("https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/diffusers/svd/rocket.png?download=true")
+    image = load_image(f"{os.path.dirname(__file__)}/../resources/rocket.png") # 1024x576 pixels
+    image = image.resize((768, 432), Image.Resampling.LANCZOS)
+    return image
 
 
 def __get_compiler_config():

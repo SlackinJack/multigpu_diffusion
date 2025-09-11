@@ -95,11 +95,8 @@ def initialize():
 
     # quantize
     quant = {}
-    if args.quantize_to is not None:
-        quant = {"quantization_config": QuantoConfig(weights_dtype=args.quantize_to)}
-    def quantize(model, desc):
-        do_quantization(model, desc, args.quantize_to, logger)
-        return
+    if args.quantize_to is not None:    quant = {"quantization_config": QuantoConfig(weights_dtype=args.quantize_to)}
+    def quantize(model, desc):          do_quantization(model, desc, args.quantize_to, logger)
 
     # set distrifuser
     distri_config = DistriConfig(
@@ -119,7 +116,7 @@ def initialize():
     # set pipeline
     logger.info(f"Initializing pipeline")
     kwargs = {}
-    kwargs["pretrained_model_name_or_path"] = args.model
+    kwargs["pretrained_model_name_or_path"] = args.checkpoint
     kwargs["torch_dtype"] = torch_dtype
     kwargs["use_safetensors"] = True
     kwargs["local_files_only"] = True
@@ -137,22 +134,22 @@ def initialize():
     match args.type:
         case "sdxl":
             if args.quantize_to is not None:
-                to_quantize["text_encoder"] = CLIPTextModel.from_pretrained(args.model, subfolder="text_encoder", **kwargs_model)
-                to_quantize["text_encoder_2"] = CLIPTextModelWithProjection.from_pretrained(args.model, subfolder="text_encoder_2", **kwargs_model)
+                to_quantize["text_encoder"] = CLIPTextModel.from_pretrained(args.checkpoint, subfolder="text_encoder", **kwargs_model)
+                to_quantize["text_encoder_2"] = CLIPTextModelWithProjection.from_pretrained(args.checkpoint, subfolder="text_encoder_2", **kwargs_model)
                 if args.ip_adapter is None:
-                    to_quantize["unet"] = UNet2DConditionModel.from_pretrained(args.model, subfolder="unet", **quant, **kwargs_model).to(f'cuda:{local_rank}')
+                    to_quantize["unet"] = UNet2DConditionModel.from_pretrained(args.checkpoint, subfolder="unet", **quant, **kwargs_model).to(f'cuda:{local_rank}')
                 else:
                     quantize_unet_after = True
-            kwargs["vae"] = AutoencoderKL.from_pretrained(args.model, subfolder="vae", **kwargs_model)
+            kwargs["vae"] = AutoencoderKL.from_pretrained(args.checkpoint, subfolder="vae", **kwargs_model)
             PipelineClass = DistriSDXLPipeline
         case _:
             if args.quantize_to is not None:
-                to_quantize["text_encoder"] = CLIPTextModel.from_pretrained(args.model, subfolder="text_encoder", **kwargs_model)
+                to_quantize["text_encoder"] = CLIPTextModel.from_pretrained(args.checkpoint, subfolder="text_encoder", **kwargs_model)
                 if args.ip_adapter is None:
-                    to_quantize["unet"] = UNet2DConditionModel.from_pretrained(args.model, subfolder="unet", **quant, **kwargs_model).to(f'cuda:{local_rank}')
+                    to_quantize["unet"] = UNet2DConditionModel.from_pretrained(args.checkpoint, subfolder="unet", **quant, **kwargs_model).to(f'cuda:{local_rank}')
                 else:
                     quantize_unet_after = True
-            kwargs["vae"] = AutoencoderKL.from_pretrained(args.model, subfolder="vae", **kwargs_model)
+            kwargs["vae"] = AutoencoderKL.from_pretrained(args.checkpoint, subfolder="vae", **kwargs_model)
             PipelineClass = DistriSDPipeline
 
     # set vae
@@ -170,22 +167,8 @@ def initialize():
 
     # set ipadapter
     if args.ip_adapter is not None:
-        assert args.quantize_to is None, "IPAdapter is not supported when using quantization"
-        ip_adapter = json.loads(args.ip_adapter)
-        for m, s in ip_adapter.items():
-            split = m.split("/")
-            ip_adapter_file = split[-1]
-            ip_adapter_subfolder = split[-2]
-            ip_adapter_folder = m.replace(f'/{ip_adapter_subfolder}/{ip_adapter_file}', "")
-            pipe.pipeline.load_ip_adapter(
-                ip_adapter_folder,
-                subfolder=ip_adapter_subfolder,
-                weight_name=ip_adapter_file,
-                use_safetensors=False, # NOTE: safetensors off
-                local_files_only=True,
-                low_cpu_mem_usage=True,
-            )
-            pipe.pipeline.set_ip_adapter_scale(s)
+        args.ip_adapter = json.loads(args.ip_adapter)
+        load_ip_adapter(pipe, args.ip_adapter)
 
     # deferred quantize
     if quantize_unet_after:
@@ -197,23 +180,19 @@ def initialize():
         adapter_names = load_lora(args.lora, pipe.pipeline, local_rank, logger, (args.quantize_to is not None))
         if len(to_quantize) > 0:
             logger.info("Requantizing unet, text encoder(s)")
-            if to_quantize.get("unet") is not None:
-                quantize(pipe.unet, "unet")
-            if to_quantize.get("text_encoder") is not None:
-                quantize(pipe.text_encoder, "text_encoder")
-            if to_quantize.get("text_encoder_2") is not None:
-                quantize(pipe.text_encoder_2, "text_encoder_2")
+            if to_quantize.get("unet") is not None:             quantize(pipe.unet, "unet")
+            if to_quantize.get("text_encoder") is not None:     quantize(pipe.text_encoder, "text_encoder")
+            if to_quantize.get("text_encoder_2") is not None:   quantize(pipe.text_encoder_2, "text_encoder_2")
 
     # set scheduler
-    if args.scheduler is not None:
-        pipe.pipeline.scheduler = get_scheduler(args.scheduler, pipe.pipeline.scheduler.config)
+    if args.scheduler is not None: pipe.pipeline.scheduler = get_scheduler(args.scheduler, pipe.pipeline.scheduler.config)
 
     # set memory saving
-    if args.enable_vae_slicing: pipe.pipeline.vae.enable_slicing()
-    if args.enable_vae_tiling:  pipe.pipeline.vae.enable_tiling()
-    if args.xformers_efficient: pipe.pipeline.enable_xformers_memory_efficient_attention()
-    if args.enable_sequential_cpu_offload: logger.info("sequential CPU offload not supported - ignoring")
-    if args.enable_model_cpu_offload: logger.info("model CPU offload not supported - ignoring")
+    if args.enable_vae_slicing:             pipe.pipeline.vae.enable_slicing()
+    if args.enable_vae_tiling:              pipe.pipeline.vae.enable_tiling()
+    if args.xformers_efficient:             pipe.pipeline.enable_xformers_memory_efficient_attention()
+    if args.enable_sequential_cpu_offload:  logger.info("sequential CPU offload not supported - ignoring")
+    if args.enable_model_cpu_offload:       logger.info("model CPU offload not supported - ignoring")
 
     # compiles
     if args.compile_unet:           compile_unet(pipe.pipeline, adapter_names, logger, is_distrifuser=True)
@@ -228,12 +207,6 @@ def initialize():
 
     # warm up run
     if args.warm_up_steps > 0:
-        def get_warmup_image():
-            # image = load_image("https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/diffusers/svd/rocket.png?download=true")
-            image = load_image(f"{os.path.dirname(__file__)}/resources/rocket.png") # 1024x576 pixels
-            image = image.resize((768, 432), Image.Resampling.LANCZOS)
-            return image
-
         logger.info("Starting warmup run")
         if can_cache:
             helper = DeepCacheSDHelper(pipe=pipe)
@@ -398,15 +371,15 @@ def generate_image():
     cfg                 = data.get("cfg")
     clip_skip           = data.get("clip_skip")
 
-    if positive is not None and len(positive) == 0:                     positive = None
-    if negative is not None and len(negative) == 0:                     negative = None
-    if image is None and positive is None and positive_embeds is None:  jsonify({ "message": "No input provided", "output": None, "is_image": False })
-    if positive is not None and positive_embeds is not None:            jsonify({ "message": "Provide only one positive input", "output": None, "is_image": False })
-    if negative is not None and negative_embeds is not None:            jsonify({ "message": "Provide only one negative input", "output": None, "is_image": False })
-    if ip_image is not None:                                            ip_image = decode_b64_and_unpickle(ip_image)
-    if latent is not None:                                              latent = decode_b64_and_unpickle(latent)
-    if positive_embeds is not None:                                     positive_embeds = decode_b64_and_unpickle(positive_embeds)
-    if negative_embeds is not None:                                     negative_embeds = decode_b64_and_unpickle(negative_embeds)
+    if positive is not None and len(positive) == 0:             positive = None
+    if negative is not None and len(negative) == 0:             negative = None
+    if positive is None and positive_embeds is None:            jsonify({ "message": "No input provided", "output": None, "is_image": False })
+    if positive is not None and positive_embeds is not None:    jsonify({ "message": "Provide only one positive input", "output": None, "is_image": False })
+    if negative is not None and negative_embeds is not None:    jsonify({ "message": "Provide only one negative input", "output": None, "is_image": False })
+    if ip_image is not None:                                    ip_image = decode_b64_and_unpickle(ip_image)
+    if latent is not None:                                      latent = decode_b64_and_unpickle(latent)
+    if positive_embeds is not None:                             positive_embeds = decode_b64_and_unpickle(positive_embeds)
+    if negative_embeds is not None:                             negative_embeds = decode_b64_and_unpickle(negative_embeds)
 
     params = [
         dummy,

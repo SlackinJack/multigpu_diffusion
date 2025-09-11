@@ -105,11 +105,8 @@ def initialize():
 
     # quantize
     quant = {}
-    if args.quantize_to is not None:
-        quant = {"quantization_config": QuantoConfig(weights_dtype=args.quantize_to)}
-    def quantize(model, desc):
-        do_quantization(model, desc, args.quantize_to, logger)
-        return
+    if args.quantize_to is not None:    quant = {"quantization_config": QuantoConfig(weights_dtype=args.quantize_to)}
+    def quantize(model, desc):          do_quantization(model, desc, args.quantize_to, logger)
 
     # set pipeline
     logger.info(f"Initializing pipeline")
@@ -158,54 +155,54 @@ def initialize():
             PipelineClass = AnimateDiffControlNetPipeline if args.control_net is not None else AnimateDiffPipeline
         case "sd1":
             if args.quantize_to is not None:
-                to_quantize["text_encoder"] = CLIPTextModel.from_pretrained(args.model, subfolder="text_encoder", **kwargs_model)
+                to_quantize["text_encoder"] = CLIPTextModel.from_pretrained(args.checkpoint, subfolder="text_encoder", **kwargs_model)
                 if args.ip_adapter is None:
-                    to_quantize["unet"] = UNet2DConditionModel.from_pretrained(args.model, subfolder="unet", **quant, **kwargs_model).to(f'cuda:{local_rank}')
+                    to_quantize["unet"] = UNet2DConditionModel.from_pretrained(args.checkpoint, subfolder="unet", **quant, **kwargs_model).to(f'cuda:{local_rank}')
                 else:
                     quantize_unet_after = True
-            kwargs["vae"] = AutoencoderKL.from_pretrained(args.model, subfolder="vae", **kwargs_model)
+            kwargs["vae"] = AutoencoderKL.from_pretrained(args.checkpoint, subfolder="vae", **kwargs_model)
             PipelineClass = StableDiffusionControlNetPipeline if args.control_net is not None else StableDiffusionPipeline
         case "sd2":
             if args.quantize_to is not None:
-                to_quantize["text_encoder"] = CLIPTextModel.from_pretrained(args.model, subfolder="text_encoder", **kwargs_model)
+                to_quantize["text_encoder"] = CLIPTextModel.from_pretrained(args.checkpoint, subfolder="text_encoder", **kwargs_model)
                 if args.ip_adapter is None:
-                    to_quantize["unet"] = UNet2DConditionModel.from_pretrained(args.model, subfolder="unet", **quant, **kwargs_model).to(f'cuda:{local_rank}')
+                    to_quantize["unet"] = UNet2DConditionModel.from_pretrained(args.checkpoint, subfolder="unet", **quant, **kwargs_model).to(f'cuda:{local_rank}')
                 else:
                     quantize_unet_after = True
-            kwargs["vae"] = AutoencoderKL.from_pretrained(args.model, subfolder="vae", **kwargs_model)
+            kwargs["vae"] = AutoencoderKL.from_pretrained(args.checkpoint, subfolder="vae", **kwargs_model)
             PipelineClass = StableDiffusionControlNetPipeline if args.control_net is not None else StableDiffusionPipeline
         case "sd3":
             if args.quantize_to is not None:
-                to_quantize["text_encoder"] = CLIPTextModelWithProjection.from_pretrained(args.model, subfolder="text_encoder", **kwargs_model)
-                to_quantize["text_encoder_2"] = CLIPTextModelWithProjection.from_pretrained(args.model, subfolder="text_encoder_2", **kwargs_model)
-                to_quantize["text_encoder_3"] = T5EncoderModel.from_pretrained(args.model, subfolder="text_encoder_3", **kwargs_model)
+                to_quantize["text_encoder"] = CLIPTextModelWithProjection.from_pretrained(args.checkpoint, subfolder="text_encoder", **kwargs_model)
+                to_quantize["text_encoder_2"] = CLIPTextModelWithProjection.from_pretrained(args.checkpoint, subfolder="text_encoder_2", **kwargs_model)
+                to_quantize["text_encoder_3"] = T5EncoderModel.from_pretrained(args.checkpoint, subfolder="text_encoder_3", **kwargs_model)
                 if args.ip_adapter is None:
-                    to_quantize["transformer"] = SD3Transformer2DModel.from_pretrained(args.model, subfolder="transformer", **quant, **kwargs_model).to(f'cuda:{local_rank}')
+                    to_quantize["transformer"] = SD3Transformer2DModel.from_pretrained(args.checkpoint, subfolder="transformer", **quant, **kwargs_model).to(f'cuda:{local_rank}')
                 else:
                     quantize_unet_after = True
-            kwargs["vae"] = AutoencoderKL.from_pretrained(args.model, subfolder="vae", **kwargs_model)
+            kwargs["vae"] = AutoencoderKL.from_pretrained(args.checkpoint, subfolder="vae", **kwargs_model)
             PipelineClass = StableDiffusion3ControlNetPipeline if args.control_net is not None else StableDiffusion3Pipeline
         case "sdup":
             if args.quantize_to is not None:
-                to_quantize["text_encoder"] = CLIPTextModel.from_pretrained(args.model, subfolder="text_encoder", **kwargs_model)
-                to_quantize["unet"] = UNet2DConditionModel.from_pretrained(args.model, subfolder="unet", **quant, **kwargs_model).to(f'cuda:{local_rank}')
-            kwargs["vae"] = AutoencoderKL.from_pretrained(args.model, subfolder="vae", **kwargs_model)
+                to_quantize["text_encoder"] = CLIPTextModel.from_pretrained(args.checkpoint, subfolder="text_encoder", **kwargs_model)
+                to_quantize["unet"] = UNet2DConditionModel.from_pretrained(args.checkpoint, subfolder="unet", **quant, **kwargs_model).to(f'cuda:{local_rank}')
+            kwargs["vae"] = AutoencoderKL.from_pretrained(args.checkpoint, subfolder="vae", **kwargs_model)
             PipelineClass = StableDiffusionUpscalePipeline
         case "sdxl":
             if args.quantize_to is not None:
-                to_quantize["text_encoder"] = CLIPTextModel.from_pretrained(args.model, subfolder="text_encoder", **kwargs_model)
-                to_quantize["text_encoder_2"] = CLIPTextModelWithProjection.from_pretrained(args.model, subfolder="text_encoder_2", **kwargs_model)
+                to_quantize["text_encoder"] = CLIPTextModel.from_pretrained(args.checkpoint, subfolder="text_encoder", **kwargs_model)
+                to_quantize["text_encoder_2"] = CLIPTextModelWithProjection.from_pretrained(args.checkpoint, subfolder="text_encoder_2", **kwargs_model)
                 if args.ip_adapter is None:
-                    to_quantize["unet"] = UNet2DConditionModel.from_pretrained(args.model, subfolder="unet", **quant, **kwargs_model).to(f'cuda:{local_rank}')
+                    to_quantize["unet"] = UNet2DConditionModel.from_pretrained(args.checkpoint, subfolder="unet", **quant, **kwargs_model).to(f'cuda:{local_rank}')
                 else:
                     quantize_unet_after = True
-            kwargs["vae"] = AutoencoderKL.from_pretrained(args.model, subfolder="vae", **kwargs_model)
+            kwargs["vae"] = AutoencoderKL.from_pretrained(args.checkpoint, subfolder="vae", **kwargs_model)
             PipelineClass = StableDiffusionXLControlNetPipeline if args.control_net is not None else StableDiffusionXLPipeline
         case "svd":
             if args.quantize_to is not None:
-                to_quantize["image_encoder"] = CLIPVisionModelWithProjection.from_pretrained(args.model, subfolder="image_encoder", **kwargs_model)
-                to_quantize["unet"] = UNetSpatioTemporalConditionModel.from_pretrained(args.model, subfolder="unet", **quant, **kwargs_model).to(f'cuda:{local_rank}')
-            kwargs["vae"] = AutoencoderKLTemporalDecoder.from_pretrained(args.model, subfolder="vae", **kwargs_model)
+                to_quantize["image_encoder"] = CLIPVisionModelWithProjection.from_pretrained(args.checkpoint, subfolder="image_encoder", **kwargs_model)
+                to_quantize["unet"] = UNetSpatioTemporalConditionModel.from_pretrained(args.checkpoint, subfolder="unet", **quant, **kwargs_model).to(f'cuda:{local_rank}')
+            kwargs["vae"] = AutoencoderKLTemporalDecoder.from_pretrained(args.checkpoint, subfolder="vae", **kwargs_model)
             PipelineClass = StableVideoDiffusionPipeline
         case _: raise NotImplementedError
 
@@ -219,63 +216,41 @@ def initialize():
             quantize(v, k)
             kwargs[k] = v
 
-    pipe = PipelineClass.from_pretrained(args.model, **quant, **kwargs)
+    pipe = PipelineClass.from_pretrained(args.checkpoint, **quant, **kwargs)
     logger.info(f"Pipeline initialized")
 
     # set ipadapter
     if args.ip_adapter is not None:
         args.ip_adapter = json.loads(args.ip_adapter)
-        for m, s in args.ip_adapter.items():
-            split = m.split("/")
-            ip_adapter_file = split[-1]
-            ip_adapter_subfolder = split[-2]
-            ip_adapter_folder = m.replace(f'/{ip_adapter_subfolder}/{ip_adapter_file}', "")
-            pipe.load_ip_adapter(
-                ip_adapter_folder,
-                subfolder=ip_adapter_subfolder,
-                weight_name=ip_adapter_file,
-                torch_dtype=torch_dtype,
-                use_safetensors=False, # NOTE: safetensors off
-                local_files_only=True,
-                low_cpu_mem_usage=True,
-            )
-            pipe.set_ip_adapter_scale(s)
+        load_ip_adapter(pipe, args.ip_adapter)
 
     # deferred quantize
     if quantize_unet_after:
-        if args.type in ["sd3"]:
-            quantize(pipe.transformer, "transformer")
-        else:
-            quantize(pipe.unet, "unet")
+        if args.type in ["sd3"]:    quantize(pipe.transformer, "transformer")
+        else:                       quantize(pipe.unet, "unet")
 
     # set lora
     adapter_names = None
-    if args.lora is not None and args.type not in ["ad", "sdup", "svd"]:
+    if args.lora is not None and args.type in ["sd1", "sd2", "sd3", "sdxl"]:
         adapter_names = load_lora(args.lora, pipe, local_rank, logger, (args.quantize_to is not None))
         if len(to_quantize) > 0:
             logger.info("Requantizing unet/transformer, text encoder(s)")
-            if to_quantize.get("unet") is not None:
-                quantize(pipe.unet, "unet")
-            if to_quantize.get("transformer") is not None:
-                quantize(pipe.transformer, "transformer")
-            if to_quantize.get("text_encoder") is not None:
-                quantize(pipe.text_encoder, "text_encoder")
-            if to_quantize.get("text_encoder_2") is not None:
-                quantize(pipe.text_encoder_2, "text_encoder_2")
-            if to_quantize.get("text_encoder_3") is not None:
-                quantize(pipe.text_encoder_3, "text_encoder_3")
+            if to_quantize.get("unet") is not None:             quantize(pipe.unet, "unet")
+            if to_quantize.get("transformer") is not None:      quantize(pipe.transformer, "transformer")
+            if to_quantize.get("text_encoder") is not None:     quantize(pipe.text_encoder, "text_encoder")
+            if to_quantize.get("text_encoder_2") is not None:   quantize(pipe.text_encoder_2, "text_encoder_2")
+            if to_quantize.get("text_encoder_3") is not None:   quantize(pipe.text_encoder_3, "text_encoder_3")
 
     # set scheduler
-    if args.scheduler is not None and args.type in ["ad", "sd1", "sd2", "sd3", "sdup", "sdxl"]:
-        pipe.scheduler = get_scheduler(args.scheduler, pipe.scheduler.config)
+    if args.scheduler is not None and args.type in ["ad", "sd1", "sd2", "sd3", "sdup", "sdxl"]: pipe.scheduler = get_scheduler(args.scheduler, pipe.scheduler.config)
 
     # set memory saving
     if args.type not in ["svd"]:
-        if args.enable_vae_slicing: pipe.vae.enable_slicing()
-        if args.enable_vae_tiling:  pipe.vae.enable_tiling()
-        if args.xformers_efficient: pipe.enable_xformers_memory_efficient_attention()
-    if args.enable_sequential_cpu_offload: logger.info("sequential CPU offload not supported - ignoring")
-    if args.enable_model_cpu_offload: logger.info("model CPU offload not supported - ignoring")
+        if args.enable_vae_slicing:         pipe.vae.enable_slicing()
+        if args.enable_vae_tiling:          pipe.vae.enable_tiling()
+        if args.xformers_efficient:         pipe.enable_xformers_memory_efficient_attention()
+    if args.enable_sequential_cpu_offload:  logger.info("sequential CPU offload not supported - ignoring")
+    if args.enable_model_cpu_offload:       logger.info("model CPU offload not supported - ignoring")
 
     # compiles
     if args.compile_unet:
@@ -297,11 +272,6 @@ def initialize():
 
     # warm up run
     if args.warm_up_steps > 0:
-        def get_warmup_image():
-            # image = load_image("https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/diffusers/svd/rocket.png?download=true")
-            image = load_image(f"{os.path.dirname(__file__)}/resources/rocket.png") # 1024x576 pixels
-            image = image.resize((768, 432), Image.Resampling.LANCZOS)
-            return image
         generator = torch.Generator(device="cpu").manual_seed(1)
         async_diff.reset_state(warm_up=args.warm_up)
 

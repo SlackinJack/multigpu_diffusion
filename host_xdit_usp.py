@@ -117,7 +117,7 @@ def initialize():
     logger.info(f"Initializing pipeline")
     # https://github.com/Wan-Video/Wan2.1
     kwargs = {}
-    kwargs["checkpoint_dir"] = args.model
+    kwargs["checkpoint_dir"] = args.checkpoint
     kwargs["device_id"] = local_rank
     kwargs["rank"] = rank
     kwargs["t5_fsdp"] = False # True default
