@@ -6,8 +6,6 @@ def patch(patches):
     for entry in patches:
         file_name = entry.get("file_name")
         try:
-            replaced = False
-
             # read file
             with open(file_name, "r") as file:
                 orig = file.read()
@@ -42,4 +40,4 @@ def patch_flexible(patches):
         if result.lower() in entry.get("proceed"):
             patch([{"file_name": entry.get("file_name"), "replace": entry.get("replace")}])
         else:
-            print(f"Skipping this patch.")
+            print("Skipping this patch.")

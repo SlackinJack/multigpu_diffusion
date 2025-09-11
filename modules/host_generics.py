@@ -1,7 +1,6 @@
 import gc
 import json
 import logging
-import mmap
 import os
 import safetensors
 import torch
@@ -26,12 +25,10 @@ GENERIC_HOST_ARGS = {
     "gguf_model":           str,    # path
     "motion_module":        str,    # path
     "motion_adapter":       str,    # path
-    "motion_adapter_lora":  str,    # path
     "control_net":          str,    # path
     "vae":                  str,    # path
     "lora":                 str,    # json dict > { "path": scale, ... }
     "ip_adapter":           str,    # json dict > { "path": scale, ... }
-    "image_scale":          float,
 }
 
 
@@ -55,6 +52,7 @@ def clean():
 
 
 def setup_torch_dynamo():
+    # TODO: config.json
     #torch._dynamo.config.suppress_errors = True
     #torch._dynamo.config.capture_scalar_outputs = False
     torch._dynamo.config.cache_size_limit = int(8 * 4)

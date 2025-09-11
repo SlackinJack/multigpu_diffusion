@@ -131,7 +131,7 @@ def initialize():
 
     # set control net
     controlnet_model = None
-    if args.control_net is not None:
+    if args.control_net is not None and args.type not in ["sdup", "svd"]:
         args.control_net = json.loads(args.control_net)
         for k, v in args.control_net.items():
             controlnet_model = ControlNetModel.from_pretrained(k, **quant, **kwargs_model)
@@ -250,7 +250,7 @@ def initialize():
 
     # set lora
     adapter_names = None
-    if args.lora is not None and args.type in ["sd1", "sd2", "sd3", "sdxl"]:
+    if args.lora is not None and args.type not in ["ad", "sdup", "svd"]:
         adapter_names = load_lora(args.lora, pipe, local_rank, logger, (args.quantize_to is not None))
         if len(to_quantize) > 0:
             logger.info("Requantizing unet/transformer, text encoder(s)")
