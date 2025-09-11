@@ -28,6 +28,25 @@ patches_any = [
 
 patches = [
     {
+        "file_name": f"{root}/model_executor/pipelines/pipeline_hunyuandit.py",
+        "replace": [
+            # Fix legacy output type error
+            {
+                "from": """        image_rotary_emb = get_2d_rotary_pos_embed(
+            self.transformer.inner_dim // self.transformer.num_heads,
+            grid_crops_coords,
+            (grid_height, grid_width),
+        )""",
+                "to": """        image_rotary_emb = get_2d_rotary_pos_embed(
+            self.transformer.inner_dim // self.transformer.num_heads,
+            grid_crops_coords,
+            (grid_height, grid_width),
+            output_type="pt",
+        )""",
+            },
+        ],
+    },
+    {
         "file_name": f"{root}/core/distributed/parallel_state.py",
         "replace": [
             # Increase torch timeout to 1 day

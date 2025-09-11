@@ -381,34 +381,31 @@ def generate_image_parallel(
 
     generator = torch.Generator(device="cpu").manual_seed(seed)
 
-    is_image                                                    = True
-    kwargs                                                      = {}
-    kwargs["generator"]                                         = generator
-    kwargs["guidance_scale"]                                    = cfg
-    kwargs["num_inference_steps"]                               = steps
-    kwargs["callback_on_step_end"]                              = set_step_progress
-    kwargs["width"]                                             = args.width
-    kwargs["height"]                                            = args.height
-    kwargs["max_sequence_length"]                               = 256
-    kwargs["output_type"]                                       = "pil"
-    kwargs["use_resolution_binning"]                            = input_config.use_resolution_binning
-    if positive is not None:                                    kwargs["prompt"]                    = positive
-    if negative is not None:                                    kwargs["negative_prompt"]           = negative
-    if positive_embeds is not None:                             kwargs["prompt_embeds"]             = positive_embeds
-    if positive_pooled_embeds is not None:                      kwargs["pooled_prompt_embeds"]      = positive_pooled_embeds
-    if negative_embeds is not None:                             kwargs["negative_embeds"]           = negative_embeds
-    if negative_pooled_embeds is not None:                      kwargs["negative_pooled_embeds"]    = negative_pooled_embeds
-    if latent is not None:                                      kwargs["latents"]                   = latent
-    if clip_skip is not None:                                   kwargs["clip_skip"]                 = clip_skip
+    is_image                                = True
+    kwargs                                  = {}
+    kwargs["generator"]                     = generator
+    kwargs["guidance_scale"]                = cfg
+    kwargs["num_inference_steps"]           = steps
+    # TODO: fix callback/progressbar
+    #kwargs["callback_on_step_end"]          = set_step_progress
+    kwargs["width"]                         = args.width
+    kwargs["height"]                        = args.height
+    kwargs["max_sequence_length"]           = 256
+    kwargs["output_type"]                   = "pil"
+    kwargs["use_resolution_binning"]        = input_config.use_resolution_binning
+    if positive is not None:                kwargs["prompt"]                    = positive
+    if negative is not None:                kwargs["negative_prompt"]           = negative
+    if positive_embeds is not None:         kwargs["prompt_embeds"]             = positive_embeds
+    if positive_pooled_embeds is not None:  kwargs["pooled_prompt_embeds"]      = positive_pooled_embeds
+    if negative_embeds is not None:         kwargs["negative_embeds"]           = negative_embeds
+    if negative_pooled_embeds is not None:  kwargs["negative_pooled_embeds"]    = negative_pooled_embeds
+    if latent is not None:                  kwargs["latents"]                   = latent
+    if clip_skip is not None:               kwargs["clip_skip"]                 = clip_skip
     if args.ip_adapter is not None:
         if ip_image is not None:
             kwargs["ip_adapter_image"] = ip_image
         else:
             return "No IPAdapter image provided for a IPAdapter-loaded pipeline", None, False
-
-    if args.type in ["flux", "sd3"]:
-        # TODO: fix callback/progressbar
-        del kwargs["callback_on_step_end"]
 
     output = pipe(**kwargs)
 
@@ -455,15 +452,15 @@ def generate_image():
     cfg                 = data.get("cfg")
     clip_skip           = data.get("clip_skip")
 
-    if positive is not None and len(positive) == 0:                     positive = None
-    if negative is not None and len(negative) == 0:                     negative = None
-    if image is None and positive is None and positive_embeds is None:  jsonify({ "message": "No input provided", "output": None, "is_image": False })
-    if positive is not None and positive_embeds is not None:            jsonify({ "message": "Provide only one positive input", "output": None, "is_image": False })
-    if negative is not None and negative_embeds is not None:            jsonify({ "message": "Provide only one negative input", "output": None, "is_image": False })
-    if ip_image is not None:                                            ip_image = decode_b64_and_unpickle(ip_image)
-    if latent is not None:                                              latent = decode_b64_and_unpickle(latent)
-    if positive_embeds is not None:                                     positive_embeds = decode_b64_and_unpickle(positive_embeds)
-    if negative_embeds is not None:                                     negative_embeds = decode_b64_and_unpickle(negative_embeds)
+    if positive is not None and len(positive) == 0:             positive = None
+    if negative is not None and len(negative) == 0:             negative = None
+    if positive is None and positive_embeds is None:            jsonify({ "message": "No input provided", "output": None, "is_image": False })
+    if positive is not None and positive_embeds is not None:    jsonify({ "message": "Provide only one positive input", "output": None, "is_image": False })
+    if negative is not None and negative_embeds is not None:    jsonify({ "message": "Provide only one negative input", "output": None, "is_image": False })
+    if ip_image is not None:                                    ip_image = decode_b64_and_unpickle(ip_image)
+    if latent is not None:                                      latent = decode_b64_and_unpickle(latent)
+    if positive_embeds is not None:                             positive_embeds = decode_b64_and_unpickle(positive_embeds)
+    if negative_embeds is not None:                             negative_embeds = decode_b64_and_unpickle(negative_embeds)
 
     params = [
         dummy,
