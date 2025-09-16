@@ -1,3 +1,4 @@
+import copy
 import gc
 import json
 import logging
@@ -5,6 +6,7 @@ import os
 import safetensors
 import torch
 import torch._dynamo
+import torch.nn.functional as F
 from diffusers.utils import load_image
 from optimum.quanto import freeze, qfloat8, qint2, qint4, qint8, quantize
 from PIL import Image
@@ -21,7 +23,6 @@ GENERIC_HOST_ARGS = {
     "port":                 int,
     "type":                 str,
     "variant":              str,
-    "scheduler":            str,
     "quantize_to":          str,
     "checkpoint":           str,    # path
     "gguf_model":           str,    # path
@@ -30,9 +31,9 @@ GENERIC_HOST_ARGS = {
     "motion_adapter_lora":  str,    # path
     "control_net":          str,    # path
     "vae":                  str,    # path
+    "scheduler":            str,    # json dict > { "key": value, ... }
     "lora":                 str,    # json dict > { "path": scale, ... }
     "ip_adapter":           str,    # json dict > { "path": scale, ... }
-    "image_scale":          float,
 }
 
 
@@ -222,3 +223,66 @@ def print_params(params, logger):
     logger.info(formatted)
     return
 
+
+def unscale_and_decode(latents, pipe):
+    # unscale/denormalize the latents
+    # denormalize with the mean and std if available and not None
+    has_latents_mean = hasattr(pipe.vae.config, "latents_mean") and pipe.vae.config.latents_mean is not None
+    has_latents_std = hasattr(pipe.vae.config, "latents_std") and pipe.vae.config.latents_std is not None
+    if has_latents_mean and has_latents_std:
+        latents_mean = (
+            torch.tensor(pipe.vae.config.latents_mean).view(1, 4, 1, 1).to(latents.device, latents.dtype)
+        )
+        latents_std = (
+            torch.tensor(pipe.vae.config.latents_std).view(1, 4, 1, 1).to(latents.device, latents.dtype)
+        )
+        latents = latents * latents_std / pipe.vae.config.scaling_factor + latents_mean
+    else:
+        latents = latents / pipe.vae.config.scaling_factor
+
+    #with torch.no_grad():
+    latents = pipe.vae.decode(latents, return_dict=False)[0]
+
+    return latents
+
+
+def process_input_latent(latents, pipe, device, target_dtype):
+    #with torch.no_grad():
+    latents = latents.to(device, pipe.vae.dtype)
+
+    latents = pipe.vae.encode(latents).latent_dist
+    latents = latents.sample() * pipe.vae.config.scaling_factor
+
+    latents = latents.to(target_dtype)
+    latents = latents * 0.18215
+    return latents
+
+
+def convert_latent_to_image(latents, pipe):
+    # start edited from diffusers.pipelines.stable_diffusion_xl.pipeline_stable_diffusion_xl#__call__
+
+    # make sure the VAE is in float32 mode, as it overflows in float16
+    needs_upcasting = pipe.vae.dtype == torch.float16 and pipe.vae.config.force_upcast
+
+    if needs_upcasting:
+        pipe.upcast_vae()
+        latents = latents.to(next(iter(pipe.vae.post_quant_conv.parameters())).dtype)
+    elif latents.dtype != pipe.vae.dtype:
+        if torch.backends.mps.is_available():
+            # some platforms (eg. apple mps) misbehave due to a pytorch bug: https://github.com/pytorch/pytorch/pull/99272
+            pipe.vae = pipe.vae.to(latents.dtype)
+
+    latents = unscale_and_decode(latents, pipe)
+
+    # cast back to fp16 if needed
+    if needs_upcasting:
+        pipe.vae.to(dtype=torch.float16)
+
+    if pipe.watermark is not None:
+        latents = pipe.watermark.apply_watermark(latents)
+
+    #with torch.no_grad():
+    latents = pipe.image_processor.postprocess(latents, output_type="pil")
+
+    # end edited from diffusers
+    return latents

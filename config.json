@@ -3,15 +3,6 @@
         "cuda_devices_desc": "cuda devices that will be visible (format: '0,1,2,3', where int=device_id), leave empty to use all devices",
         "cuda_devices": "",
 
-        "host_init_timeout_desc": "host initialize timeout (in seconds) before giving up",
-        "host_init_timeout": 1200,
-
-        "port_desc": "port to run flask host",
-        "port": 6000,
-
-        "master_port_desc": "port to run c10d",
-        "master_port": 29400,
-
         "grpc_port_desc": "port to run grpc (localai-only)",
         "grpc_port": 50050
     },
