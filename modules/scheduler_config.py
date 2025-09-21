@@ -3,13 +3,17 @@ import copy
 
 from diffusers.schedulers import (
     DDIMScheduler,
+    DDPMScheduler,
     DEISMultistepScheduler,
     DPMSolverMultistepScheduler,
     DPMSolverSDEScheduler,
     DPMSolverSinglestepScheduler,
+    EDMDPMSolverMultistepScheduler,
+    EDMEulerScheduler,
     EulerAncestralDiscreteScheduler,
     EulerDiscreteScheduler,
     HeunDiscreteScheduler,
+    IPNDMScheduler,
     LMSDiscreteScheduler,
     KDPM2AncestralDiscreteScheduler,
     KDPM2DiscreteScheduler,
@@ -38,13 +42,41 @@ def get_scheduler_class(scheduler_name):
         case "lms":             return LMSDiscreteScheduler
 
         case "ddim":            return DDIMScheduler
+        case "ddpm":            return DDPMScheduler
         case "deis":            return DEISMultistepScheduler
         case "dpm_sde":         return DPMSolverSDEScheduler
         case "pndm":            return PNDMScheduler
         case "tcd":             return TCDScheduler
         case "unipc":           return UniPCMultistepScheduler
 
+        case "ipndm":           return IPNDMScheduler
+
         case _:                 raise NotImplementedError
+
+
+def get_scheduler_name(scheduler):
+    match str(type(scheduler).__name__):
+        case "DPMSolverMultistepScheduler":     return "dpmpp_2m"
+        # case "DPMSolverMultistepScheduler":     return "dpmpp_2m_sde"
+        case "DPMSolverSinglestepScheduler":    return "dpmpp_sde"
+        case "KDPM2DiscreteScheduler":          return "dpm_2"
+        case "KDPM2AncestralDiscreteScheduler": return "dpm_2_a"
+        case "EulerDiscreteScheduler":          return "euler"
+        case "EulerAncestralDiscreteScheduler": return "euler_a"
+        case "HeunDiscreteScheduler":           return "heun"
+        case "LMSDiscreteScheduler":            return "lms"
+
+        case "DDIMScheduler":                   return "ddim"
+        case "DDPMScheduler":                   return "ddpm"
+        case "DEISMultistepScheduler":          return "deis"
+        case "DPMSolverSDEScheduler":           return "dpm_sde"
+        case "PNDMScheduler":                   return "pndm"
+        case "TCDScheduler":                    return "tcd"
+        case "UniPCMultistepScheduler":         return "unipc"
+
+        case "IPNDMScheduler":                  return "ipndm"
+
+        case _:                                 raise NotImplementedError
 
 
 def get_scheduler_config(scheduler_dict, current_scheduler_config):

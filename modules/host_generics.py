@@ -8,8 +8,10 @@ import safetensors
 import torch
 import torch._dynamo
 import torch.nn.functional as F
+import torchvision.transforms.functional as F2
 from diffusers import EulerAncestralDiscreteScheduler
 from diffusers.utils import load_image
+from diffusers.utils.torch_utils import randn_tensor
 from optimum.quanto import freeze, qfloat8, qint2, qint4, qint8, quantize
 from PIL import Image
 
@@ -163,17 +165,15 @@ def __get_compiler_config():
 
 def compile_unet(pipe, adapter_names, logger, is_distrifuser=False):
     backend, mode, fullgraph = __get_compiler_config()
+    kwargs = {"backend": backend, "fullgraph": fullgraph, "dynamic": False}
+    if len(mode) > 0: kwargs["mode"] = mode
     logger.info(f"compiling unet with {backend}:{mode}, fullgraph={fullgraph}")
     if adapter_names:
         if is_distrifuser:  pipe.unet.model.fuse_lora(adapter_names=adapter_names, lora_scale=1.0)
         else:               pipe.unet.fuse_lora(adapter_names=adapter_names, lora_scale=1.0)
         pipe.unload_lora_weights()
-    if is_distrifuser:
-        if len(mode) > 0:   pipe.unet.model = torch.compile(pipe.unet.model, backend=backend, mode=mode, fullgraph=fullgraph, dynamic=False)
-        else:               pipe.unet.model = torch.compile(pipe.unet.model, backend=backend, fullgraph=fullgraph, dynamic=False)
-    else:
-        if len(mode) > 0:   pipe.unet = torch.compile(pipe.unet, backend=backend, mode=mode, fullgraph=fullgraph, dynamic=False)
-        else:               pipe.unet = torch.compile(pipe.unet, backend=backend, fullgraph=fullgraph, dynamic=False)
+    if is_distrifuser:      pipe.unet.model = torch.compile(pipe.unet.model, **kwargs)
+    else:                   pipe.unet = torch.compile(pipe.unet, **kwargs)
     logger.info(f"compiled unet")
     return
 
@@ -226,23 +226,130 @@ def print_params(params, logger):
     return
 
 
-def process_input_latent(latents, pipe, dtype, device):
-    latents = latents * pipe.vae.config.scaling_factor
+def normalize_latent(x, max_val=3.0):
+    max_val = torch.tensor(max_val)
+    x = x.detach().clone()
+    for i in range(x.shape[0]):
+        x[[i], :] = torch.sqrt(max_val**2 - 1) * x[[i], :] / torch.sqrt(torch.add(x[[i], :]**2, max_val**2 - 1))
+        for chl in range(4):
+            if x[i, chl, :, :].std() > 1.0:
+                x[i, chl, :, :] /= x[i, chl, :, :].std()
+    return x
 
-    # color fix
-    target = 0.5
-    lat_min = latents.min()
-    lat_max = latents.max()
-    if torch.isclose(lat_max, lat_min):
-        latents = torch.clamp(latents, min=-target, max=target)
-    else:
-        lat_scale = (target - -target) / (lat_max - lat_min)
-        lat_shift = -target - lat_min * lat_scale
-        latents = latents * lat_scale + lat_shift
+
+def process_input_latent(latents, scheduler_name, pipe, dtype, device, is_distrifuser=False):
+    if is_distrifuser:  p = pipe.pipeline
+    else:               p = pipe
+
+    latents = add_alpha_to_latent(latents)
+
+    latents = p.scheduler.scale_model_input(latents, timestep=p.scheduler.timesteps[-1])
+    latents = latents * p.vae.config.scaling_factor
+
+    target = 255
+    latents = normalize_latent(latents, max_val=target)
+
+    latents = latents * 0.5
 
     latents = latents.to(device)
     latents = latents.to(dtype)
     return latents
+
+
+def deduplicate_timesteps(timesteps, logger):
+    clamped = False
+    max_timestep = timesteps[0]
+    timesteps = timesteps[::-1]
+    out = [timesteps[0]]
+    for i in timesteps[1:]:
+        last = out[-1]
+        while i <= last:
+            i += 1
+        if not i > max_timestep:
+            out.append(i)
+        else:
+            clamped = True
+            break
+    out = out[::-1]
+    if clamped:
+        logger.info(f"timesteps were clamped to {len(out)} steps")
+    return out
+
+
+def set_timesteps(pipe, latents, scheduler_name, steps, denoise, sigmas, timesteps, logger, is_distrifuser=False):
+    if is_distrifuser:  p = pipe.pipeline
+    else:               p = pipe
+
+    # preference order: timesteps > sigmas > betas
+
+    use_mu = [] # deis, dpmpp_2m, dpmpp_sde, unipc, needs diffusers >= 0.35.1
+    use_timesteps = ["ddpm", "dpmpp_2m", "dpmpp_sde", "euler", "heun", "tcd"]
+    use_sigmas = ["euler"]
+    use_betas = ["ddim", "deis", "dpm_sde", "euler_a", "dpm_2", "dpm_2_a", "lms", "pndm", "unipc"]
+    bypass_beta_rescale = ["euler_a"]
+    no_denoise = ["ipndm"]
+
+    if scheduler_name in no_denoise:
+        logger.info(f"scheduler {scheduler_name} does not support any types of denoising - ignoring denoise")
+        return None, None
+    elif scheduler_name in use_betas:
+        # TODO: dial this in
+        denoise_rescale = 4 / 5
+        if not scheduler_name in bypass_beta_rescale:
+            denoise = denoise * denoise_rescale
+        if latents is not None:
+            latents_rescale = (49 / 32) * (45 / 32 * (1 - denoise))
+            latents = latents / denoise_rescale * latents_rescale
+        logger.info(f"using scheduler betas for denoise (this may result in blurry images)")
+        new_config = {}
+        for k, v in p.scheduler.config.items(): new_config[k] = v
+        new_config["beta_start"] = new_config["beta_start"] * denoise
+        new_config["beta_end"] = new_config["beta_end"] * denoise
+        p.scheduler = p.scheduler.from_config(new_config)
+        return latents, { "num_inference_steps": int(steps) }
+    elif denoise == 1.00:
+        return None, None
+    elif scheduler_name in use_mu:
+        p.scheduler.set_timesteps(mu=denoise)
+        return latents, None
+    else:
+        is_timestep = True
+        if timesteps is not None:
+            if scheduler_name not in use_timesteps:
+                logger.info(f"scheduler {scheduler_name} does not support timesteps - ignoring denoise")
+                return None, None
+            out = [int(t * denoise) for t in timesteps]
+        elif sigmas is not None:
+            is_timestep = False
+            if scheduler_name not in use_sigmas:
+                logger.info(f"scheduler {scheduler_name} does not support sigmas - ignoring denoise")
+                return None, None
+            out = [float(s * denoise) for s in sigmas]
+        else:
+            if scheduler_name in use_timesteps:
+                t = p.scheduler.timesteps
+                t_max = int(t[0])
+                t_min = int(t[-1])
+            elif scheduler_name in use_sigmas:
+                is_timestep = False
+                t = p.scheduler.sigmas
+                t_max = float(t[0])
+                t_min = float(t[-1])
+            else:
+                return None, None
+            out = []
+            for i in range(steps):
+                next_val = i * (t_min + t_max) * denoise / steps
+                if is_timestep: next_val = int(next_val)
+                else:           next_val = float(next_val)
+                if len(out) > 0 and out[i - 1] >= next_val: out.append(t_min if next_val <= t_min else next_val)
+                else:               out.insert(0, t_min if next_val <= t_min else next_val)
+
+        latents_rescale = (61 / 32) * (35 / 32 * (1 - denoise))
+        latents = latents * latents_rescale
+        if is_timestep: out = deduplicate_timesteps(out, logger)
+        if is_timestep: return latents, { "timesteps": out }
+        else:           return latents, { "sigmas": out }
 
 
 def add_alpha_to_latent(latents):
@@ -258,19 +365,23 @@ def remove_alpha_from_latent(latents):
     return latents
 
 
-def convert_latent_to_output_latent(latents, pipe):
+def convert_latent_to_output_latent(latents, pipe, is_distrifuser=False):
+    if is_distrifuser:  p = pipe.pipeline
+    else:               p = pipe
     latents = latents.to(torch.float32)
-    latents = latents / pipe.vae.config.scaling_factor
+    latents = latents / p.vae.config.scaling_factor
     latents = add_alpha_to_latent(latents)
     return latents
 
 
-def convert_latent_to_image(latents, pipe):
-    default_pipe_dtype = copy.deepcopy(pipe.vae.dtype)
+def convert_latent_to_image(latents, pipe, is_distrifuser=False):
+    if is_distrifuser:  p = pipe.pipeline
+    else:               p = pipe
+    default_pipe_dtype = copy.deepcopy(p.vae.dtype)
     latents = latents.to(torch.float32)
-    latents = latents / pipe.vae.config.scaling_factor
+    latents = latents / p.vae.config.scaling_factor
     latents = add_alpha_to_latent(latents)
-    latents = pipe.vae.decode(latents, return_dict=False)[0]
-    image = pipe.image_processor.postprocess(latents, output_type="pil")
-    pipe.vae = pipe.vae.to(default_pipe_dtype)
+    latents = p.vae.decode(latents, return_dict=False)[0]
+    image = p.image_processor.postprocess(latents, output_type="pil")
+    p.vae = p.vae.to(default_pipe_dtype)
     return image
