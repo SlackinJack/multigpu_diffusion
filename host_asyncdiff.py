@@ -382,8 +382,9 @@ def generate_image_parallel(
 
             generator = torch.Generator(device="cpu").manual_seed(seed)
 
-            can_use_compel = args.compel and not positive_embeds and not negative_embeds and args.type in ["sd1", "sd2", "sdxl"]
-            if can_use_compel:
+            positive_pooled_embeds = None
+            negative_pooled_embeds = None
+            if args.compel and args.type in ["sd1", "sd2", "sdxl"] and positive_embeds is None and negative_embeds is None:
                 if args.type in ["sd1", "sd2"]:
                     embeddings_type = ReturnedEmbeddingsType.PENULTIMATE_HIDDEN_STATES_NORMALIZED
                 else:
@@ -438,14 +439,13 @@ def generate_image_parallel(
                     kwargs["output_type"] = "pil"
                 case _:
                     is_image = True
-                    positive_pooled_embeds = None
-                    negative_pooled_embeds = None
-                    if positive_embeds is not None:
-                        positive_pooled_embeds = positive_embeds[0][1]["pooled_output"]
-                        positive_embeds = positive_embeds[0][0]
-                    if negative_embeds is not None:
-                        negative_pooled_embeds = negative_embeds[0][1]["pooled_output"]
-                        negative_embeds = negative_embeds[0][0]
+                    if not args.compel:
+                        if positive_embeds is not None:
+                            positive_pooled_embeds = positive_embeds[0][1]["pooled_output"]
+                            positive_embeds = positive_embeds[0][0]
+                        if negative_embeds is not None:
+                            negative_pooled_embeds = negative_embeds[0][1]["pooled_output"]
+                            negative_embeds = negative_embeds[0][0]
 
                     if positive is not None:                kwargs["prompt"]                    = positive
                     if negative is not None:                kwargs["negative_prompt"]           = negative
@@ -504,7 +504,7 @@ def generate_image_parallel(
                 helper.disable()
                 del helper
 
-            if can_use_compel:
+            if args.compel:
                 # https://github.com/damian0815/compel/issues/24
                 positive_embeds = positive_pooled_embeds = negative_embeds = negative_pooled_embeds = None
 

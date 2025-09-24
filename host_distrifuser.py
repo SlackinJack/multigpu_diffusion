@@ -271,7 +271,7 @@ def generate_image_parallel(
                 negative_pooled_embeds = negative_embeds[0][1]["pooled_output"]
                 negative_embeds = negative_embeds[0][0]
 
-            if args.compel and not positive_embeds and not negative_embeds:
+            if args.compel and positive_embeds is None and negative_embeds is None:
                 if args.type in ["sd1", "sd2"]:
                     embeddings_type = ReturnedEmbeddingsType.PENULTIMATE_HIDDEN_STATES_NORMALIZED
                 else:
