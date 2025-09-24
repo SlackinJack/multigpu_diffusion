@@ -246,10 +246,10 @@ def process_input_latent(latents, scheduler_name, pipe, dtype, device, is_distri
     latents = p.scheduler.scale_model_input(latents, timestep=p.scheduler.timesteps[-1])
     latents = latents * p.vae.config.scaling_factor
 
-    target = 255
+    target = 8
     latents = normalize_latent(latents, max_val=target)
 
-    latents = latents * 0.5
+    latents = latents * (94 / 192)
 
     latents = latents.to(device)
     latents = latents.to(dtype)
@@ -294,15 +294,23 @@ def set_timesteps(pipe, latents, scheduler_name, steps, denoise, sigmas, timeste
         return None, None
     elif scheduler_name in use_betas:
         # TODO: dial this in
-        denoise_rescale = 4 / 5
+        denoise_rescale = 1 # 4 / 5
         if not scheduler_name in bypass_beta_rescale:
             denoise = denoise * denoise_rescale
         if latents is not None:
-            latents_rescale = (49 / 32) * (45 / 32 * (1 - denoise))
+            latents_rescale = (50 / 32) * (45 * denoise_rescale / 32) - (7 * denoise_rescale / 32)
             latents = latents / denoise_rescale * latents_rescale
         logger.info(f"using scheduler betas for denoise (this may result in blurry images)")
+        # reset scheduler first
+        current_config = {}
+        for k, v in p.scheduler.config.items():
+            if k not in ["beta_start", "beta_end"]:
+                current_config[k] = v
+        p.scheduler = p.scheduler.from_config(current_config)
+        # set new scheduler
         new_config = {}
-        for k, v in p.scheduler.config.items(): new_config[k] = v
+        for k, v in p.scheduler.config.items():
+            new_config[k] = v
         new_config["beta_start"] = new_config["beta_start"] * denoise
         new_config["beta_end"] = new_config["beta_end"] * denoise
         p.scheduler = p.scheduler.from_config(new_config)
