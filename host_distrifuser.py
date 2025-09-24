@@ -209,7 +209,7 @@ def initialize():
             clean()
 
             # warm up run
-            if args.warm_up_steps > 0:
+            if args.warm_up_steps is not None and args.warm_up_steps > 0:
                 logger.info("Starting warmup run")
                 if can_cache:
                     helper = DeepCacheSDHelper(pipe=pipe)

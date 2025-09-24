@@ -280,7 +280,7 @@ def initialize():
             clean()
 
             # warm up run
-            if args.warm_up_steps > 0:
+            if args.warm_up_steps is not None and args.warm_up_steps > 0:
                 generator = torch.Generator(device="cpu").manual_seed(1)
                 async_diff.reset_state(warm_up=args.warm_up)
 

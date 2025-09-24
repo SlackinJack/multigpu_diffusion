@@ -314,7 +314,7 @@ def initialize():
             clean()
 
             # warm up run
-            if args.warm_up_steps > 0:
+            if args.warm_up_steps is not None and args.warm_up_steps > 0:
                 run_kwargs = {}
                 run_kwargs["prompt"] = "a dog"
                 run_kwargs["width"] = args.width
