@@ -448,7 +448,7 @@ def generate_image_parallel(
                 images = convert_latent_to_image(output.images, pipe)
                 latents = unscale_and_decode(output.images, pipe).to("cpu", torch.float32)
                 with app.app_context():
-                    requests.post(f"http://localhost:{args.port}/set_result", json={ "image": pickle_and_encode_b64(images[0]), "latent": pickle_and_encode_b64(latents)) })
+                    requests.post(f"http://localhost:{args.port}/set_result", json={ "image": pickle_and_encode_b64(images[0]), "latent": pickle_and_encode_b64(latents) })
 
 
 @app.route("/set_result", methods=["POST"])

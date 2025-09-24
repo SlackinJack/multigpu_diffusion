@@ -1,12 +1,4 @@
 {
-    "global": {
-        "cuda_devices_desc": "cuda devices that will be visible (format: '0,1,2,3', where int=device_id), leave empty to use all devices",
-        "cuda_devices": "",
-
-        "grpc_port_desc": "port to run grpc (localai-only)",
-        "grpc_port": 50050
-    },
-
     "compiler": {
         "backend_desc": "name of backend to use for torch compile (eg. inductor, eager, etc)",
         "backend": "eager",
