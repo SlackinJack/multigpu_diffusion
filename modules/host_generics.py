@@ -237,127 +237,22 @@ def normalize_latent(x, max_val=3.0):
     return x
 
 
-def process_input_latent(latents, scheduler_name, pipe, dtype, device, is_distrifuser=False):
+def process_input_latent(latents, pipe, dtype, device, timestep=None, is_distrifuser=False):
     if is_distrifuser:  p = pipe.pipeline
     else:               p = pipe
 
     latents = add_alpha_to_latent(latents)
 
-    latents = p.scheduler.scale_model_input(latents, timestep=p.scheduler.timesteps[-1])
+    if timestep == None:    latents = p.scheduler.scale_model_input(latents, timestep=p.scheduler.timesteps[-1])
+    else:                   latents = p.scheduler.scale_model_input(latents, timestep=timestep)
     latents = latents * p.vae.config.scaling_factor
 
     target = 8
     latents = normalize_latent(latents, max_val=target)
 
-    latents = latents * (94 / 192)
-
     latents = latents.to(device)
     latents = latents.to(dtype)
     return latents
-
-
-def deduplicate_timesteps(timesteps, logger):
-    clamped = False
-    max_timestep = timesteps[0]
-    timesteps = timesteps[::-1]
-    out = [timesteps[0]]
-    for i in timesteps[1:]:
-        last = out[-1]
-        while i <= last:
-            i += 1
-        if not i > max_timestep:
-            out.append(i)
-        else:
-            clamped = True
-            break
-    out = out[::-1]
-    if clamped:
-        logger.info(f"timesteps were clamped to {len(out)} steps")
-    return out
-
-
-def set_timesteps(pipe, latents, scheduler_name, steps, denoise, sigmas, timesteps, logger, is_distrifuser=False):
-    if is_distrifuser:  p = pipe.pipeline
-    else:               p = pipe
-
-    # preference order: timesteps > sigmas > betas
-
-    use_mu = [] # deis, dpmpp_2m, dpmpp_sde, unipc, needs diffusers >= 0.35.1
-    use_timesteps = ["ddpm", "dpmpp_2m", "dpmpp_sde", "euler", "heun", "tcd"]
-    use_sigmas = ["euler"]
-    use_betas = ["ddim", "deis", "dpm_sde", "euler_a", "dpm_2", "dpm_2_a", "lms", "pndm", "unipc"]
-    bypass_beta_rescale = ["euler_a"]
-    no_denoise = ["ipndm"]
-
-    if scheduler_name in no_denoise:
-        logger.info(f"scheduler {scheduler_name} does not support any types of denoising - ignoring denoise")
-        return None, None
-    elif scheduler_name in use_betas:
-        # TODO: dial this in
-        denoise_rescale = 1 # 4 / 5
-        if not scheduler_name in bypass_beta_rescale:
-            denoise = denoise * denoise_rescale
-        if latents is not None:
-            latents_rescale = (50 / 32) * (45 * denoise_rescale / 32) - (7 * denoise_rescale / 32)
-            latents = latents / denoise_rescale * latents_rescale
-        logger.info(f"using scheduler betas for denoise (this may result in blurry images)")
-        # reset scheduler first
-        current_config = {}
-        for k, v in p.scheduler.config.items():
-            if k not in ["beta_start", "beta_end"]:
-                current_config[k] = v
-        p.scheduler = p.scheduler.from_config(current_config)
-        # set new scheduler
-        new_config = {}
-        for k, v in p.scheduler.config.items():
-            new_config[k] = v
-        new_config["beta_start"] = new_config["beta_start"] * denoise
-        new_config["beta_end"] = new_config["beta_end"] * denoise
-        p.scheduler = p.scheduler.from_config(new_config)
-        return latents, { "num_inference_steps": int(steps) }
-    elif denoise == 1.00:
-        return None, None
-    elif scheduler_name in use_mu:
-        p.scheduler.set_timesteps(mu=denoise)
-        return latents, None
-    else:
-        is_timestep = True
-        if timesteps is not None:
-            if scheduler_name not in use_timesteps:
-                logger.info(f"scheduler {scheduler_name} does not support timesteps - ignoring denoise")
-                return None, None
-            out = [int(t * denoise) for t in timesteps]
-        elif sigmas is not None:
-            is_timestep = False
-            if scheduler_name not in use_sigmas:
-                logger.info(f"scheduler {scheduler_name} does not support sigmas - ignoring denoise")
-                return None, None
-            out = [float(s * denoise) for s in sigmas]
-        else:
-            if scheduler_name in use_timesteps:
-                t = p.scheduler.timesteps
-                t_max = int(t[0])
-                t_min = int(t[-1])
-            elif scheduler_name in use_sigmas:
-                is_timestep = False
-                t = p.scheduler.sigmas
-                t_max = float(t[0])
-                t_min = float(t[-1])
-            else:
-                return None, None
-            out = []
-            for i in range(steps):
-                next_val = i * (t_min + t_max) * denoise / steps
-                if is_timestep: next_val = int(next_val)
-                else:           next_val = float(next_val)
-                if len(out) > 0 and out[i - 1] >= next_val: out.append(t_min if next_val <= t_min else next_val)
-                else:               out.insert(0, t_min if next_val <= t_min else next_val)
-
-        latents_rescale = (61 / 32) * (35 / 32 * (1 - denoise))
-        latents = latents * latents_rescale
-        if is_timestep: out = deduplicate_timesteps(out, logger)
-        if is_timestep: return latents, { "timesteps": out }
-        else:           return latents, { "sigmas": out }
 
 
 def add_alpha_to_latent(latents):

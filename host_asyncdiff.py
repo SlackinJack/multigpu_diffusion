@@ -165,7 +165,7 @@ def initialize():
                     if args.quantize_to is not None:
                         to_quantize["text_encoder"] = CLIPTextModel.from_pretrained(args.checkpoint, subfolder="text_encoder", **kwargs_model)
                         if args.ip_adapter is None:
-                            to_quantize["unet"] = UNet2DConditionModel.from_pretrained(args.checkpoint, subfolder="unet", **quant, **kwargs_model).to(f'cuda:{local_rank}')
+                            to_quantize["unet"] = UNet2DConditionModel.from_pretrained(args.checkpoint, subfolder="unet", **quant, **kwargs_model)
                         else:
                             quantize_unet_after = True
                     kwargs["vae"] = AutoencoderKL.from_pretrained(args.checkpoint, subfolder="vae", **kwargs_vae)
@@ -174,7 +174,7 @@ def initialize():
                     if args.quantize_to is not None:
                         to_quantize["text_encoder"] = CLIPTextModel.from_pretrained(args.checkpoint, subfolder="text_encoder", **kwargs_model)
                         if args.ip_adapter is None:
-                            to_quantize["unet"] = UNet2DConditionModel.from_pretrained(args.checkpoint, subfolder="unet", **quant, **kwargs_model).to(f'cuda:{local_rank}')
+                            to_quantize["unet"] = UNet2DConditionModel.from_pretrained(args.checkpoint, subfolder="unet", **quant, **kwargs_model)
                         else:
                             quantize_unet_after = True
                     kwargs["vae"] = AutoencoderKL.from_pretrained(args.checkpoint, subfolder="vae", **kwargs_vae)
@@ -185,7 +185,7 @@ def initialize():
                         to_quantize["text_encoder_2"] = CLIPTextModelWithProjection.from_pretrained(args.checkpoint, subfolder="text_encoder_2", **kwargs_model)
                         to_quantize["text_encoder_3"] = T5EncoderModel.from_pretrained(args.checkpoint, subfolder="text_encoder_3", **kwargs_model)
                         if args.ip_adapter is None:
-                            to_quantize["transformer"] = SD3Transformer2DModel.from_pretrained(args.checkpoint, subfolder="transformer", **quant, **kwargs_model).to(f'cuda:{local_rank}')
+                            to_quantize["transformer"] = SD3Transformer2DModel.from_pretrained(args.checkpoint, subfolder="transformer", **quant, **kwargs_model)
                         else:
                             quantize_unet_after = True
                     kwargs["vae"] = AutoencoderKL.from_pretrained(args.checkpoint, subfolder="vae", **kwargs_vae)
@@ -193,7 +193,7 @@ def initialize():
                 case "sdup":
                     if args.quantize_to is not None:
                         to_quantize["text_encoder"] = CLIPTextModel.from_pretrained(args.checkpoint, subfolder="text_encoder", **kwargs_model)
-                        to_quantize["unet"] = UNet2DConditionModel.from_pretrained(args.checkpoint, subfolder="unet", **quant, **kwargs_model).to(f'cuda:{local_rank}')
+                        to_quantize["unet"] = UNet2DConditionModel.from_pretrained(args.checkpoint, subfolder="unet", **quant, **kwargs_model)
                     kwargs["vae"] = AutoencoderKL.from_pretrained(args.checkpoint, subfolder="vae", **kwargs_vae)
                     PipelineClass = StableDiffusionUpscalePipeline
                 case "sdxl":
@@ -201,7 +201,7 @@ def initialize():
                         to_quantize["text_encoder"] = CLIPTextModel.from_pretrained(args.checkpoint, subfolder="text_encoder", **kwargs_model)
                         to_quantize["text_encoder_2"] = CLIPTextModelWithProjection.from_pretrained(args.checkpoint, subfolder="text_encoder_2", **kwargs_model)
                         if args.ip_adapter is None:
-                            to_quantize["unet"] = UNet2DConditionModel.from_pretrained(args.checkpoint, subfolder="unet", **quant, **kwargs_model).to(f'cuda:{local_rank}')
+                            to_quantize["unet"] = UNet2DConditionModel.from_pretrained(args.checkpoint, subfolder="unet", **quant, **kwargs_model)
                         else:
                             quantize_unet_after = True
                     kwargs["vae"] = AutoencoderKL.from_pretrained(args.checkpoint, subfolder="vae", **kwargs_vae)
@@ -209,7 +209,7 @@ def initialize():
                 case "svd":
                     if args.quantize_to is not None:
                         to_quantize["image_encoder"] = CLIPVisionModelWithProjection.from_pretrained(args.checkpoint, subfolder="image_encoder", **kwargs_model)
-                        to_quantize["unet"] = UNetSpatioTemporalConditionModel.from_pretrained(args.checkpoint, subfolder="unet", **quant, **kwargs_model).to(f'cuda:{local_rank}')
+                        to_quantize["unet"] = UNetSpatioTemporalConditionModel.from_pretrained(args.checkpoint, subfolder="unet", **quant, **kwargs_model)
                     kwargs["vae"] = AutoencoderKLTemporalDecoder.from_pretrained(args.checkpoint, subfolder="vae", **kwargs_vae)
                     PipelineClass = StableVideoDiffusionPipeline
                 case _: raise NotImplementedError
@@ -321,7 +321,9 @@ def initialize():
                     helper = DeepCacheSDHelper(pipe=pipe)
                     helper.set_params(**cache_kwargs)
                     helper.enable()
+                pipe.vae = pipe.vae.to(torch_dtype)
                 pipe(**kwargs)
+                pipe.vae = pipe.vae.to(torch.float32)
                 if can_cache:
                     helper.disable()
                     del helper
@@ -363,6 +365,8 @@ def generate_image_parallel(
         with torch.amp.autocast("cuda", enabled=False):
             global async_diff, pipe, step_progress, can_cache, cache_kwargs
             args = get_args()
+            device = torch.device("cuda", torch.cuda.current_device())
+            torch_dtype = get_torch_type(args.variant)
             torch.cuda.reset_peak_memory_stats()
             async_diff.reset_state(warm_up=args.warm_up)
             step_progress = 0
@@ -376,8 +380,15 @@ def generate_image_parallel(
                 control_image = load_image(control_image)
 
             def set_step_progress(pipe, index, timestep, callback_kwargs):
-                global step_progress
+                global get_torch_type, logger, process_input_latent, step_progress
+                nonlocal args, denoise, device, latent, steps, torch_dtype
                 step_progress = index / steps * 100
+                if latent is not None and denoise is not None and denoise < 1.0:
+                    target = int(steps * (1 - denoise))
+                    if index == target:
+                        latent = process_input_latent(latent, pipe, torch_dtype, device, timestep=timestep)
+                        callback_kwargs["latents"] = latent
+                        logger.info(f'Injected latent at step {target}')
                 return callback_kwargs
 
             generator = torch.Generator(device="cpu").manual_seed(seed)
@@ -455,28 +466,9 @@ def generate_image_parallel(
                     if negative_pooled_embeds is not None:  kwargs["negative_pooled_embeds"]    = negative_pooled_embeds
                     if sigmas is not None:                  kwargs["sigmas"]                    = sigmas
                     if timesteps is not None:               kwargs["timesteps"]                 = timesteps
-                    if latent is not None:
-                        latent = process_input_latent(
-                            latent,
-                            get_scheduler_name(pipe.scheduler),
-                            pipe,
-                            get_torch_type(args.variant),
-                            torch.device("cuda", torch.cuda.current_device()),
-                        )
+                    if latent is not None and denoise is None:
+                        latent = process_input_latent(latent, pipe, torch_dtype, device)
                         kwargs["latents"] = latent
-                    if denoise is not None:
-                        latent, result = set_timesteps(
-                            pipe,
-                            latent,
-                            get_scheduler_name(pipe.scheduler),
-                            steps,
-                            denoise,
-                            sigmas,
-                            timesteps,
-                            logger,
-                        )
-                        if latent is not None: kwargs["latents"] = latent
-                        if result is not None: kwargs.update(result)
                     if args.ip_adapter is not None:
                         if ip_image is not None:
                             kwargs["ip_adapter_image"] = ip_image

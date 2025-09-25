@@ -130,6 +130,12 @@ def initialize():
             kwargs_model["local_files_only"] = True
             kwargs_model["low_cpu_mem_usage"] = True
 
+            kwargs_vae = {}
+            kwargs_vae["torch_dtype"] = torch.float32
+            kwargs_vae["use_safetensors"] = True
+            kwargs_vae["local_files_only"] = True
+            kwargs_vae["low_cpu_mem_usage"] = True
+
             to_quantize = {}
             quantize_unet_after = False
 
@@ -139,24 +145,24 @@ def initialize():
                         to_quantize["text_encoder"] = CLIPTextModel.from_pretrained(args.checkpoint, subfolder="text_encoder", **kwargs_model)
                         to_quantize["text_encoder_2"] = CLIPTextModelWithProjection.from_pretrained(args.checkpoint, subfolder="text_encoder_2", **kwargs_model)
                         if args.ip_adapter is None:
-                            to_quantize["unet"] = UNet2DConditionModel.from_pretrained(args.checkpoint, subfolder="unet", **quant, **kwargs_model).to(f'cuda:{local_rank}')
+                            to_quantize["unet"] = UNet2DConditionModel.from_pretrained(args.checkpoint, subfolder="unet", **quant, **kwargs_model)
                         else:
                             quantize_unet_after = True
-                    kwargs["vae"] = AutoencoderKL.from_pretrained(args.checkpoint, subfolder="vae", **kwargs_model)
+                    kwargs["vae"] = AutoencoderKL.from_pretrained(args.checkpoint, subfolder="vae", **kwargs_vae)
                     PipelineClass = DistriSDXLPipeline
                 case _:
                     if args.quantize_to is not None:
                         to_quantize["text_encoder"] = CLIPTextModel.from_pretrained(args.checkpoint, subfolder="text_encoder", **kwargs_model)
                         if args.ip_adapter is None:
-                            to_quantize["unet"] = UNet2DConditionModel.from_pretrained(args.checkpoint, subfolder="unet", **quant, **kwargs_model).to(f'cuda:{local_rank}')
+                            to_quantize["unet"] = UNet2DConditionModel.from_pretrained(args.checkpoint, subfolder="unet", **quant, **kwargs_model)
                         else:
                             quantize_unet_after = True
-                    kwargs["vae"] = AutoencoderKL.from_pretrained(args.checkpoint, subfolder="vae", **kwargs_model)
+                    kwargs["vae"] = AutoencoderKL.from_pretrained(args.checkpoint, subfolder="vae", **kwargs_vae)
                     PipelineClass = DistriSDPipeline
 
             # set vae
             if args.vae is not None:
-                kwargs["vae"] = AutoencoderKL.from_pretrained(args.vae, **kwargs_model)
+                kwargs["vae"] = AutoencoderKL.from_pretrained(args.vae, **kwargs_vae)
 
             if len(to_quantize) > 0:
                 for k, v in to_quantize.items():
@@ -223,7 +229,9 @@ def initialize():
                 kwargs["output_type"] = "pil"
                 if args.ip_adapter is not None:
                     kwargs["ip_adapter_image"] = get_warmup_image()
+                pipe.pipeline.vae = pipe.pipeline.vae.to(torch_dtype)
                 pipe(**kwargs)
+                pipe.pipeline.vae = pipe.pipeline.vae.to(torch.float32)
                 if can_cache:
                     helper.disable()
 
@@ -256,6 +264,8 @@ def generate_image_parallel(
         with torch.amp.autocast("cuda", enabled=False):
             global pipe, local_rank, step_progress, can_cache, cache_kwargs
             args = get_args()
+            device = torch.device("cuda", torch.cuda.current_device())
+            torch_dtype = get_torch_type(args.variant)
             torch.cuda.reset_peak_memory_stats()
             step_progress = 0
 
@@ -290,8 +300,15 @@ def generate_image_parallel(
                 negative = None
 
             def set_step_progress(pipe, index, timestep, callback_kwargs):
-                global step_progress
+                global get_torch_type, logger, process_input_latent, step_progress
+                nonlocal args, denoise, device, latent, steps, torch_dtype
                 step_progress = index / steps * 100
+                if latent is not None and denoise is not None and denoise < 1.0:
+                    target = int(steps * (1 - denoise))
+                    if index == target:
+                        latent = process_input_latent(latent, pipe, torch_dtype, device, timestep=timestep)
+                        callback_kwargs["latents"] = latent
+                        logger.info(f'Injected latent at step {target}')
                 return callback_kwargs
 
             generator = torch.Generator(device="cpu").manual_seed(seed)
@@ -301,6 +318,7 @@ def generate_image_parallel(
             kwargs["guidance_scale"]                = cfg
             kwargs["num_inference_steps"]           = steps
             kwargs["callback_on_step_end"]          = set_step_progress
+            kwargs["output_type"]                   = "latent"
             if positive is not None:                kwargs["prompt"]                    = positive
             if negative is not None:                kwargs["negative_prompt"]           = negative
             if positive_embeds is not None:         kwargs["prompt_embeds"]             = positive_embeds
@@ -310,30 +328,9 @@ def generate_image_parallel(
             if clip_skip is not None:               kwargs["clip_skip"]                 = clip_skip
             if sigmas is not None:                  kwargs["sigmas"]                    = sigmas
             if timesteps is not None:               kwargs["timesteps"]                 = timesteps
-            if latent is not None:
-                latent = process_input_latent(
-                    latent,
-                    get_scheduler_name(pipe.pipeline.scheduler),
-                    pipe,
-                    get_torch_type(args.variant),
-                    torch.device("cuda", torch.cuda.current_device()),
-                    is_distrifuser=True,
-                )
+            if latent is not None and denoise is None:
+                latent = process_input_latent(latent, pipe, torch_dtype, device)
                 kwargs["latents"] = latent
-            if denoise is not None:
-                latent, result = set_timesteps(
-                    pipe,
-                    latent,
-                    get_scheduler_name(pipe.scheduler),
-                    steps,
-                    denoise,
-                    sigmas,
-                    timesteps,
-                    logger,
-                    is_distrifuser=True
-                )
-                if latent is not None: kwargs["latents"] = latent
-                if result is not None: kwargs.update(result)
             if args.ip_adapter is not None:
                 if ip_image is not None:
                     kwargs["ip_adapter_image"] = ip_image
@@ -376,7 +373,10 @@ def generate_image_parallel(
                 output = pickle.loads(output_bytes.cpu().numpy().tobytes())
                 if output is not None:
                     step_progress = 100
-                    return "OK", pickle_and_encode_b64(output.images[0]), True
+                    images = convert_latent_to_image(copy.deepcopy(output.images.to(device)), pipe, is_distrifuser=True)
+                    latents = convert_latent_to_output_latent(copy.deepcopy(output.images.to(device)), pipe, is_distrifuser=True)
+                    return "OK", { "image": pickle_and_encode_b64(images[0]), "latent": pickle_and_encode_b64(latents) }, True
+                    # return "OK", pickle_and_encode_b64(output.images[0]), True
                 else:
                     return "No image from pipeline", None, True
 
@@ -445,8 +445,8 @@ def generate_image():
             "sigmas": (sigmas is not None),
             "timesteps": (timesteps is not None),
         }, logger)
-    message, output_base64, is_image = generate_image_parallel(*params)
-    response = { "message": message, "output": output_base64, "is_image": is_image }
+    message, outputs, is_image = generate_image_parallel(*params)
+    response = { "message": message, "output": outputs.get("image"), "latent": outputs.get("latent"), "is_image": is_image }
     return jsonify(response)
 
 
