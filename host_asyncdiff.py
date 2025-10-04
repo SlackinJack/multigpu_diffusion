@@ -249,9 +249,7 @@ def initialize():
                     if to_quantize.get("text_encoder_3") is not None:   quantize(pipe.text_encoder_3, "text_encoder_3")
 
             # set scheduler
-            if args.scheduler is not None and args.type in ["ad", "sd1", "sd2", "sd3", "sdup", "sdxl"]:
-                args.scheduler = json.loads(args.scheduler)
-                pipe.scheduler = get_scheduler(args.scheduler, pipe.scheduler.config)
+            set_scheduler(args, pipe)
 
             # set memory saving
             if args.type not in ["svd"]:
@@ -359,6 +357,7 @@ def generate_image_parallel(
     denoise,
     sigmas,
     timesteps,
+    denoising_end,
 ):
 
     with torch.no_grad():
@@ -370,6 +369,7 @@ def generate_image_parallel(
             torch.cuda.reset_peak_memory_stats()
             async_diff.reset_state(warm_up=args.warm_up)
             step_progress = 0
+            set_scheduler(args, pipe)
 
             if args.type in ["sdup", "svd"]:
                 if image is None: return "No image provided for an image pipeline.", None, False
@@ -383,7 +383,9 @@ def generate_image_parallel(
                 global get_torch_type, logger, process_input_latent, step_progress
                 nonlocal args, denoise, device, latent, steps, torch_dtype
                 step_progress = index / steps * 100
-                if latent is not None and denoise is not None and denoise < 1.0:
+                if latent is not None:
+                    if denoise is None or denoise > 1.0:
+                        denoise = 1.0
                     target = int(steps * (1 - denoise))
                     if index == target:
                         latent = process_input_latent(latent, pipe, torch_dtype, device, timestep=timestep)
@@ -466,9 +468,7 @@ def generate_image_parallel(
                     if negative_pooled_embeds is not None:  kwargs["negative_pooled_embeds"]    = negative_pooled_embeds
                     if sigmas is not None:                  kwargs["sigmas"]                    = sigmas
                     if timesteps is not None:               kwargs["timesteps"]                 = timesteps
-                    if latent is not None and denoise is None:
-                        latent = process_input_latent(latent, pipe, torch_dtype, device)
-                        kwargs["latents"] = latent
+                    if denoising_end is not None:           kwargs["denoising_end"]             = denoising_end
                     if args.ip_adapter is not None:
                         if ip_image is not None:
                             kwargs["ip_adapter_image"] = ip_image
@@ -546,6 +546,7 @@ def generate_image():
     denoise             = data.get("denoise")
     sigmas              = data.get("sigmas")
     timesteps           = data.get("timesteps")
+    denoising_end       = data.get("denoising_end")
 
     if positive is not None and len(positive) == 0:                     positive = None
     if negative is not None and len(negative) == 0:                     negative = None
@@ -583,6 +584,7 @@ def generate_image():
         denoise,
         sigmas,
         timesteps,
+        denoising_end,
     ]
     dist.broadcast_object_list(params, src=0)
     print_params(
@@ -607,6 +609,7 @@ def generate_image():
             "denoise": denoise,
             "sigmas": (sigmas is not None),
             "timesteps": (timesteps is not None),
+            "denoising_end": denoising_end,
         }, logger)
     message, outputs, is_image = generate_image_parallel(*params)
     if is_image and args.type not in ["ad", "sdup", "svd"]:
@@ -624,7 +627,7 @@ def run_host():
         app.run(host="localhost", port=args.port)
     else:
         while True:
-            params = [None] * 21 # len(params) of generate_image_parallel()
+            params = [None] * 22 # len(params) of generate_image_parallel()
             logger.info(f"waiting for tasks")
             dist.broadcast_object_list(params, src=0)
             if params[0] is None:

@@ -16,6 +16,9 @@ from optimum.quanto import freeze, qfloat8, qint2, qint4, qint8, quantize
 from PIL import Image
 
 
+from modules.scheduler_config import get_scheduler, get_scheduler_name
+
+
 config          = json.load(open(os.path.dirname(os.path.abspath(__file__)) + "/../config.json"))
 config_compiler = config["compiler"]
 
@@ -98,6 +101,16 @@ def get_encoder_type(t):
         case "int4":    return qint4
         case "int8":    return qint8
         case _:         return None
+
+
+def set_scheduler(args, pipe, is_distrifuser=False):
+    if is_distrifuser:  p = pipe.pipeline
+    else:               p = pipe
+
+    if args.scheduler is not None:
+        args.scheduler = json.loads(args.scheduler)
+        p.scheduler = get_scheduler(args.scheduler, p.scheduler.config)
+    return
 
 
 def do_quantization(model, desc, quantize_to, logger):
@@ -242,15 +255,16 @@ def process_input_latent(latents, pipe, dtype, device, timestep=None, is_distrif
     else:               p = pipe
 
     latents = add_alpha_to_latent(latents)
+    latents = latents.to(pipe.device)
 
     if timestep == None:    latents = p.scheduler.scale_model_input(latents, timestep=p.scheduler.timesteps[-1])
     else:                   latents = p.scheduler.scale_model_input(latents, timestep=timestep)
     latents = latents * p.vae.config.scaling_factor
 
-    target = 8
+    target = 255
     latents = normalize_latent(latents, max_val=target)
+    latents = latents * 68.5 / 100
 
-    latents = latents.to(device)
     latents = latents.to(dtype)
     return latents
 
