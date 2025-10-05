@@ -378,11 +378,17 @@ def generate_image_parallel(
                 negative_pooled_embeds = negative_embeds[0][1]["pooled_output"]
                 negative_embeds = negative_embeds[0][0]
 
+            latents_set = False
             def set_step_progress(pipe, index, timestep, callback_kwargs):
                 global get_torch_type, logger, process_input_latent, step_progress
-                nonlocal args, denoise, device, latent, steps, torch_dtype
-                step_progress = index / steps * 100
-                if latent is not None:
+                nonlocal args, denoise, device, latent, steps, torch_dtype, latents_set
+                scheduler_name = get_scheduler_name(pipe.scheduler)
+                if scheduler_name in ["heun"]:
+                    the_index = int(index / 2)
+                else:
+                    the_index = index
+                step_progress = the_index / steps * 100
+                if latent is not None and not latents_set:
                     if denoise is None or denoise > 1.0:
                         denoise = 1.0
                     target = int(steps * (1 - denoise))
@@ -390,6 +396,8 @@ def generate_image_parallel(
                         latent = process_input_latent(latent, pipe, torch_dtype, device, timestep=timestep)
                         callback_kwargs["latents"] = latent
                         logger.info(f'Injected latent at step {target}')
+                        latents_set = True
+                # TODO: fix callback
                 if "negative_prompt_embeds" not in callback_kwargs:
                     callback_kwargs["negative_prompt_embeds"] = None
                 if "negative_pooled_prompt_embeds" not in callback_kwargs:
