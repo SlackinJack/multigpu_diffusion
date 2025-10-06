@@ -379,17 +379,16 @@ def generate_image_parallel(
             if control_image is not None and args.control_net is not None:
                 control_image = load_image(control_image)
 
-            latents_set = False
             def set_step_progress(pipe, index, timestep, callback_kwargs):
                 global get_torch_type, logger, process_input_latent, step_progress
-                nonlocal args, denoise, device, latent, steps, torch_dtype, latents_set
+                nonlocal args, denoise, device, latent, steps, torch_dtype
                 scheduler_name = get_scheduler_name(pipe.scheduler)
                 if scheduler_name in ["heun"]:
                     the_index = int(index / 2)
                 else:
                     the_index = index
                 step_progress = the_index / steps * 100
-                if latent is not None and not latents_set:
+                if latent is not None:
                     if denoise is None or denoise > 1.0:
                         denoise = 1.0
                     target = int(steps * (1 - denoise))
@@ -397,7 +396,6 @@ def generate_image_parallel(
                         latent = process_input_latent(latent, pipe, torch_dtype, device, timestep=timestep)
                         callback_kwargs["latents"] = latent
                         logger.info(f'Injected latent at step {target}')
-                        latents_set = True
                 return callback_kwargs
 
             generator = torch.Generator(device="cpu").manual_seed(seed)
