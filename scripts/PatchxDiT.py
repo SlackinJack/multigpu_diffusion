@@ -22,6 +22,23 @@ patches_any = [
                 "from": "import xfuser ",
                 "to":   "import xDiT.xfuser ",
             },
+            {
+                # Fix UnboundLocalError on most pipelines' callback
+                "from": """negative_prompt_embeds = callback_outputs.pop(
+                            "negative_prompt_embeds", negative_prompt_embeds
+                        )
+                        negative_pooled_prompt_embeds = callback_outputs.pop(
+                            "negative_pooled_prompt_embeds",
+                            negative_pooled_prompt_embeds,
+                        )""",
+                "to": """#negative_prompt_embeds = callback_outputs.pop(
+                        #    "negative_prompt_embeds", negative_prompt_embeds
+                        #)
+                        #negative_pooled_prompt_embeds = callback_outputs.pop(
+                        #    "negative_pooled_prompt_embeds",
+                        #    negative_pooled_prompt_embeds,
+                        #)""",
+            },
         ],
     },
 ]

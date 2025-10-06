@@ -185,6 +185,12 @@ def initialize():
             kwargs_model["local_files_only"] = True
             kwargs_model["low_cpu_mem_usage"] = True
 
+            kwargs_vae = {}
+            kwargs_vae["torch_dtype"] = torch.float32
+            kwargs_vae["use_safetensors"] = True
+            kwargs_vae["local_files_only"] = True
+            kwargs_vae["low_cpu_mem_usage"] = True
+
             PipelineClass = None
             to_quantize = {}
             quantize_unet_after = False
@@ -210,7 +216,7 @@ def initialize():
                                 quantize_unet_after = True
                         to_quantize["text_encoder"] = CLIPTextModel.from_pretrained(args.checkpoint, subfolder="text_encoder", **kwargs_model)
                         to_quantize["text_encoder_2"] = T5EncoderModel.from_pretrained(args.checkpoint, subfolder="text_encoder_2", **kwargs_model)
-                    kwargs["vae"] = AutoencoderKL.from_pretrained(args.checkpoint, subfolder="vae", **kwargs_model)
+                    kwargs["vae"] = AutoencoderKL.from_pretrained(args.checkpoint, subfolder="vae", **kwargs_vae)
                     PipelineClass = xFuserFluxPipeline
                 case "hy":
                     if args.quantize_to is not None:
@@ -220,7 +226,7 @@ def initialize():
                             to_quantize["transformer"] = HunyuanDiT2DModel.from_pretrained(args.checkpoint, subfolder="transformer", **quant, **kwargs_model)
                         else:
                             quantize_unet_after = True
-                    kwargs["vae"] = AutoencoderKL.from_pretrained(args.checkpoint, subfolder="vae", **kwargs_model)
+                    kwargs["vae"] = AutoencoderKL.from_pretrained(args.checkpoint, subfolder="vae", **kwargs_vae)
                     PipelineClass = xFuserHunyuanDiTPipeline
                 case "pixa":
                     if args.quantize_to is not None:
@@ -229,7 +235,7 @@ def initialize():
                             to_quantize["transformer"] = Transformer2DModel.from_pretrained(args.checkpoint, subfolder="transformer", **quant, **kwargs_model)
                         else:
                             quantize_unet_after = True
-                    kwargs["vae"] = AutoencoderKL.from_pretrained(args.checkpoint, subfolder="vae", **kwargs_model)
+                    kwargs["vae"] = AutoencoderKL.from_pretrained(args.checkpoint, subfolder="vae", **kwargs_vae)
                     PipelineClass = xFuserPixArtAlphaPipeline
                 case "pixs":
                     if args.quantize_to is not None:
@@ -238,7 +244,7 @@ def initialize():
                             to_quantize["transformer"] = Transformer2DModel.from_pretrained(args.checkpoint, subfolder="transformer", **quant, **kwargs_model)
                         else:
                             quantize_unet_after = True
-                    kwargs["vae"] = AutoencoderKL.from_pretrained(args.checkpoint, subfolder="vae", **kwargs_model)
+                    kwargs["vae"] = AutoencoderKL.from_pretrained(args.checkpoint, subfolder="vae", **kwargs_vae)
                     PipelineClass = xFuserPixArtSigmaPipeline
                 case "sd3":
                     if args.quantize_to is not None:
@@ -249,13 +255,13 @@ def initialize():
                             to_quantize["transformer"] = SD3Transformer2DModel.from_pretrained(args.checkpoint, subfolder="transformer", **quant, **kwargs_model)
                         else:
                             quantize_unet_after = True
-                    kwargs["vae"] = AutoencoderKL.from_pretrained(args.checkpoint, subfolder="vae", **kwargs_model)
+                    kwargs["vae"] = AutoencoderKL.from_pretrained(args.checkpoint, subfolder="vae", **kwargs_vae)
                     PipelineClass = xFuserStableDiffusion3Pipeline
                 case _: raise NotImplementedError
 
             # set vae
             if args.vae is not None:
-                kwargs["vae"] = AutoencoderKL.from_pretrained(args.vae, **kwargs_model)
+                kwargs["vae"] = AutoencoderKL.from_pretrained(args.vae, **kwargs_vae)
 
             if len(to_quantize) > 0:
                 for k, v in to_quantize.items():
@@ -382,12 +388,12 @@ def generate_image_parallel(
             def set_step_progress(pipe, index, timestep, callback_kwargs):
                 global get_torch_type, logger, process_input_latent, step_progress
                 nonlocal args, denoise, device, latent, steps, torch_dtype, latents_set
-                scheduler_name = get_scheduler_name(pipe.scheduler)
-                if scheduler_name in ["heun"]:
-                    the_index = int(index / 2)
-                else:
-                    the_index = index
-                step_progress = the_index / steps * 100
+                #scheduler_name = get_scheduler_name(pipe.scheduler)
+                #if scheduler_name in ["heun"]:
+                #    the_index = int(index / 2)
+                #else:
+                #    the_index = index
+                step_progress = index / steps * 100
                 if latent is not None and not latents_set:
                     if denoise is None or denoise > 1.0:
                         denoise = 1.0
@@ -449,8 +455,14 @@ def generate_image_parallel(
                         return "OK", output_base64, is_image
             elif output is not None:
                 logger.info(f"task completed")
-                images = convert_latent_to_image(copy.deepcopy(output.images.to(device)), pipe, is_distrifuser=True)
-                latents = convert_latent_to_output_latent(copy.deepcopy(output.images.to(device)), pipe, is_distrifuser=True)
+                latents = output.images
+
+                # from xdit process_latents(latents)
+                latents = pipe._unpack_latents(latents, args.height, args.width, pipe.vae_scale_factor)
+                # latents = (latents / pipe.vae.config.scaling_factor) + pipe.vae.config.shift_factor
+
+                images = convert_latent_to_image(copy.deepcopy(latents.to(device)), pipe)
+                latents = convert_latent_to_output_latent(copy.deepcopy(latents.to(device)), pipe)
                 with app.app_context():
                     requests.post(f"http://localhost:{args.port}/set_result", json={ "image": pickle_and_encode_b64(images[0]), "latent": pickle_and_encode_b64(latents) })
 
