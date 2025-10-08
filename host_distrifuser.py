@@ -144,19 +144,19 @@ def initialize():
                     if args.quantize_to is not None:
                         to_quantize["text_encoder"] = CLIPTextModel.from_pretrained(args.checkpoint, subfolder="text_encoder", **kwargs_model)
                         to_quantize["text_encoder_2"] = CLIPTextModelWithProjection.from_pretrained(args.checkpoint, subfolder="text_encoder_2", **kwargs_model)
-                        if args.ip_adapter is None:
-                            to_quantize["unet"] = UNet2DConditionModel.from_pretrained(args.checkpoint, subfolder="unet", **quant, **kwargs_model)
-                        else:
-                            quantize_unet_after = True
+                        #if args.ip_adapter is None:
+                        #    to_quantize["unet"] = UNet2DConditionModel.from_pretrained(args.checkpoint, subfolder="unet", **quant, **kwargs_model)
+                        #else:
+                        quantize_unet_after = True
                     kwargs["vae"] = AutoencoderKL.from_pretrained(args.checkpoint, subfolder="vae", **kwargs_vae)
                     PipelineClass = DistriSDXLPipeline
                 case _:
                     if args.quantize_to is not None:
                         to_quantize["text_encoder"] = CLIPTextModel.from_pretrained(args.checkpoint, subfolder="text_encoder", **kwargs_model)
-                        if args.ip_adapter is None:
-                            to_quantize["unet"] = UNet2DConditionModel.from_pretrained(args.checkpoint, subfolder="unet", **quant, **kwargs_model)
-                        else:
-                            quantize_unet_after = True
+                        #if args.ip_adapter is None:
+                        #    to_quantize["unet"] = UNet2DConditionModel.from_pretrained(args.checkpoint, subfolder="unet", **quant, **kwargs_model)
+                        #else:
+                        quantize_unet_after = True
                     kwargs["vae"] = AutoencoderKL.from_pretrained(args.checkpoint, subfolder="vae", **kwargs_vae)
                     PipelineClass = DistriSDPipeline
 
@@ -179,7 +179,7 @@ def initialize():
 
             # deferred quantize
             if quantize_unet_after:
-                quantize(pipe.unet, "unet")
+                quantize(pipe.pipeline.unet.model, "unet")
 
             # set lora
             adapter_names = None
@@ -187,9 +187,9 @@ def initialize():
                 adapter_names = load_lora(args.lora, pipe.pipeline, local_rank, logger, (args.quantize_to is not None))
                 if len(to_quantize) > 0:
                     logger.info("Requantizing unet, text encoder(s)")
-                    if to_quantize.get("unet") is not None:             quantize(pipe.unet, "unet")
-                    if to_quantize.get("text_encoder") is not None:     quantize(pipe.text_encoder, "text_encoder")
-                    if to_quantize.get("text_encoder_2") is not None:   quantize(pipe.text_encoder_2, "text_encoder_2")
+                    if to_quantize.get("unet") is not None or quantize_unet_after:  quantize(pipe.pipeline.unet.model, "unet")
+                    if to_quantize.get("text_encoder") is not None:                 quantize(pipe.pipeline.text_encoder, "text_encoder")
+                    if to_quantize.get("text_encoder_2") is not None:               quantize(pipe.pipeline.text_encoder_2, "text_encoder_2")
 
             # set scheduler
             set_scheduler(args, pipe, is_distrifuser=True)
@@ -313,7 +313,7 @@ def generate_image_parallel(
                         denoise = 1.0
                     target = int(steps * (1 - denoise))
                     if index == target:
-                        latent = process_input_latent(latent, pipe, torch_dtype, device, timestep=timestep)
+                        latent = process_input_latent(latent, pipe, torch_dtype, device, timestep=timestep, is_distrifuser=True)
                         callback_kwargs["latents"] = latent
                         logger.info(f'Injected latent at step {target}')
                 return callback_kwargs
@@ -352,7 +352,7 @@ def generate_image_parallel(
 
             if args.compel:
                 # https://github.com/damian0815/compel/issues/24
-                positive_embeds = positive_pooled_embeds = negative_embeds = negative_pooled_embeds = None
+                del positive_embeds, positive_pooled_embeds, negative_embeds, negative_pooled_embeds, compel
 
             # clean up
             clean()

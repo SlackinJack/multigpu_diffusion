@@ -242,11 +242,11 @@ def initialize():
                 adapter_names = load_lora(args.lora, pipe, local_rank, logger, (args.quantize_to is not None))
                 if len(to_quantize) > 0:
                     logger.info("Requantizing unet/transformer, text encoder(s)")
-                    if to_quantize.get("unet") is not None:             quantize(pipe.unet, "unet")
-                    if to_quantize.get("transformer") is not None:      quantize(pipe.transformer, "transformer")
-                    if to_quantize.get("text_encoder") is not None:     quantize(pipe.text_encoder, "text_encoder")
-                    if to_quantize.get("text_encoder_2") is not None:   quantize(pipe.text_encoder_2, "text_encoder_2")
-                    if to_quantize.get("text_encoder_3") is not None:   quantize(pipe.text_encoder_3, "text_encoder_3")
+                    if to_quantize.get("unet") is not None or (quantize_unet_after and args.type not in ["sd3"]):       quantize(pipe.unet, "unet")
+                    if to_quantize.get("transformer") is not None or (quantize_unet_after and args.type in ["sd3"]):    quantize(pipe.transformer, "transformer")
+                    if to_quantize.get("text_encoder") is not None:                                                     quantize(pipe.text_encoder, "text_encoder")
+                    if to_quantize.get("text_encoder_2") is not None:                                                   quantize(pipe.text_encoder_2, "text_encoder_2")
+                    if to_quantize.get("text_encoder_3") is not None:                                                   quantize(pipe.text_encoder_3, "text_encoder_3")
 
             # set scheduler
             set_scheduler(args, pipe)
