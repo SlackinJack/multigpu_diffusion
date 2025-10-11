@@ -101,12 +101,13 @@ def initialize():
             def quantize(model, desc):          do_quantization(model, desc, args.quantize_to, logger)
 
             # set distrifuser
+            warmup_steps = 0 if args.warm_up_steps is None else args.warm_up_steps
             distri_config = DistriConfig(
                 height=args.height,
                 width=args.width,
                 do_classifier_free_guidance=True,
                 split_batch=not args.no_split_batch,
-                warmup_steps=args.warm_up_steps,
+                warmup_steps=warmup_steps,
                 comm_checkpoint=60,
                 mode=args.sync_mode,
                 use_cuda_graph=not args.no_cuda_graph,
@@ -141,33 +142,15 @@ def initialize():
 
             match args.type:
                 case "sdxl":
-                    if args.quantize_to is not None:
-                        to_quantize["text_encoder"] = CLIPTextModel.from_pretrained(args.checkpoint, subfolder="text_encoder", **kwargs_model)
-                        to_quantize["text_encoder_2"] = CLIPTextModelWithProjection.from_pretrained(args.checkpoint, subfolder="text_encoder_2", **kwargs_model)
-                        #if args.ip_adapter is None:
-                        #    to_quantize["unet"] = UNet2DConditionModel.from_pretrained(args.checkpoint, subfolder="unet", **quant, **kwargs_model)
-                        #else:
-                        quantize_unet_after = True
                     kwargs["vae"] = AutoencoderKL.from_pretrained(args.checkpoint, subfolder="vae", **kwargs_vae)
                     PipelineClass = DistriSDXLPipeline
                 case _:
-                    if args.quantize_to is not None:
-                        to_quantize["text_encoder"] = CLIPTextModel.from_pretrained(args.checkpoint, subfolder="text_encoder", **kwargs_model)
-                        #if args.ip_adapter is None:
-                        #    to_quantize["unet"] = UNet2DConditionModel.from_pretrained(args.checkpoint, subfolder="unet", **quant, **kwargs_model)
-                        #else:
-                        quantize_unet_after = True
                     kwargs["vae"] = AutoencoderKL.from_pretrained(args.checkpoint, subfolder="vae", **kwargs_vae)
                     PipelineClass = DistriSDPipeline
 
             # set vae
             if args.vae is not None:
                 kwargs["vae"] = AutoencoderKL.from_pretrained(args.vae, **kwargs_vae)
-
-            if len(to_quantize) > 0:
-                for k, v in to_quantize.items():
-                    quantize(v, k)
-                    kwargs[k] = v
 
             pipe = PipelineClass.from_pretrained(distri_config=distri_config, **quant, **kwargs)
             logger.info(f"Pipeline initialized")
@@ -177,19 +160,17 @@ def initialize():
                 args.ip_adapter = json.loads(args.ip_adapter)
                 load_ip_adapter(pipe, args.ip_adapter)
 
-            # deferred quantize
-            if quantize_unet_after:
-                quantize(pipe.pipeline.unet.model, "unet")
+            # quantize
+            if args.quantize_to is not None:
+                if hasattr(pipe.pipeline, "unet"): quantize(pipe.pipeline.unet.model, "unet")
+                if hasattr(pipe.pipeline, "text_encoder"): quantize(pipe.pipeline.text_encoder, "text_encoder")
+                if hasattr(pipe.pipeline, "text_encoder_2"): quantize(pipe.pipeline.text_encoder_2, "text_encoder_2")
+                if hasattr(pipe.pipeline, "vae"): quantize(pipe.pipeline.vae, "vae")
 
             # set lora
             adapter_names = None
             if args.lora is not None:
-                adapter_names = load_lora(args.lora, pipe.pipeline, local_rank, logger, (args.quantize_to is not None))
-                if len(to_quantize) > 0:
-                    logger.info("Requantizing unet, text encoder(s)")
-                    if to_quantize.get("unet") is not None or quantize_unet_after:  quantize(pipe.pipeline.unet.model, "unet")
-                    if to_quantize.get("text_encoder") is not None:                 quantize(pipe.pipeline.text_encoder, "text_encoder")
-                    if to_quantize.get("text_encoder_2") is not None:               quantize(pipe.pipeline.text_encoder_2, "text_encoder_2")
+                adapter_names = load_lora(args.lora, pipe.pipeline, local_rank, logger)
 
             # set scheduler
             set_scheduler(args, pipe, is_distrifuser=True)

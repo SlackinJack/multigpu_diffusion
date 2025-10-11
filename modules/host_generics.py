@@ -122,12 +122,9 @@ def do_quantization(model, desc, quantize_to, logger):
     return
 
 
-def load_lora(lora_dict, pipe, rank, logger, is_quantized):
+def load_lora(lora_dict, pipe, rank, logger):
     loras = json.loads(lora_dict)
     names = []
-
-    if is_quantized:
-        logger.info("It looks like you are using LoRAs with quantization. This may degrade image quality.")
 
     for k, v in loras.items():
         logger.info(f"loading lora: {k}")
@@ -196,7 +193,7 @@ def compile_transformer(pipe, adapter_names, logger):
     logger.info(f"compiling transformer with {backend}:{mode}, fullgraph={fullgraph}")
     if adapter_names:
         pipe.transformer.fuse_lora(adapter_names=adapter_names, lora_scale=1.0)
-    pipe.unload_lora_weights()
+        pipe.unload_lora_weights()
     if len(mode) > 0:   pipe.transformer = torch.compile(pipe.transformer, backend=backend, mode=mode, fullgraph=fullgraph, dynamic=False)
     else:               pipe.transformer = torch.compile(pipe.transformer, backend=backend, fullgraph=fullgraph, dynamic=False)
     logger.info(f"compiled transformer")

@@ -208,53 +208,18 @@ def initialize():
                             low_cpu_mem_usage=True,
                             quantization_config=GGUFQuantizationConfig(compute_dtype=torch_dtype),
                         )
-                    if args.quantize_to is not None:
-                        if args.gguf_model is None:
-                            if args.ip_adapter is None:
-                                to_quantize["transformer"] = FluxTransformer2DModel.from_pretrained(args.checkpoint, subfolder="transformer", **quant, **kwargs_model)
-                            else:
-                                quantize_unet_after = True
-                        to_quantize["text_encoder"] = CLIPTextModel.from_pretrained(args.checkpoint, subfolder="text_encoder", **kwargs_model)
-                        to_quantize["text_encoder_2"] = T5EncoderModel.from_pretrained(args.checkpoint, subfolder="text_encoder_2", **kwargs_model)
                     kwargs["vae"] = AutoencoderKL.from_pretrained(args.checkpoint, subfolder="vae", **kwargs_vae)
                     PipelineClass = xFuserFluxPipeline
                 case "hy":
-                    if args.quantize_to is not None:
-                        to_quantize["text_encoder"] = BertModel.from_pretrained(args.checkpoint, subfolder="text_encoder", **kwargs_model)
-                        to_quantize["text_encoder_2"] = T5EncoderModel.from_pretrained(args.checkpoint, subfolder="text_encoder_2", **kwargs_model)
-                        if args.ip_adapter is None:
-                            to_quantize["transformer"] = HunyuanDiT2DModel.from_pretrained(args.checkpoint, subfolder="transformer", **quant, **kwargs_model)
-                        else:
-                            quantize_unet_after = True
                     kwargs["vae"] = AutoencoderKL.from_pretrained(args.checkpoint, subfolder="vae", **kwargs_vae)
                     PipelineClass = xFuserHunyuanDiTPipeline
                 case "pixa":
-                    if args.quantize_to is not None:
-                        to_quantize["text_encoder"] = T5EncoderModel.from_pretrained(args.checkpoint, subfolder="text_encoder", **kwargs_model)
-                        if args.ip_adapter is None:
-                            to_quantize["transformer"] = Transformer2DModel.from_pretrained(args.checkpoint, subfolder="transformer", **quant, **kwargs_model)
-                        else:
-                            quantize_unet_after = True
                     kwargs["vae"] = AutoencoderKL.from_pretrained(args.checkpoint, subfolder="vae", **kwargs_vae)
                     PipelineClass = xFuserPixArtAlphaPipeline
                 case "pixs":
-                    if args.quantize_to is not None:
-                        to_quantize["text_encoder"] = T5EncoderModel.from_pretrained(args.checkpoint, subfolder="text_encoder", **kwargs_model)
-                        if args.ip_adapter is None:
-                            to_quantize["transformer"] = Transformer2DModel.from_pretrained(args.checkpoint, subfolder="transformer", **quant, **kwargs_model)
-                        else:
-                            quantize_unet_after = True
                     kwargs["vae"] = AutoencoderKL.from_pretrained(args.checkpoint, subfolder="vae", **kwargs_vae)
                     PipelineClass = xFuserPixArtSigmaPipeline
                 case "sd3":
-                    if args.quantize_to is not None:
-                        to_quantize["text_encoder"] = CLIPTextModelWithProjection.from_pretrained(args.checkpoint, subfolder="text_encoder", **kwargs_model)
-                        to_quantize["text_encoder_2"] = CLIPTextModelWithProjection.from_pretrained(args.checkpoint, subfolder="text_encoder_2", **kwargs_model)
-                        to_quantize["text_encoder_3"] = T5EncoderModel.from_pretrained(args.checkpoint, subfolder="text_encoder_3", **kwargs_model)
-                        if args.ip_adapter is None:
-                            to_quantize["transformer"] = SD3Transformer2DModel.from_pretrained(args.checkpoint, subfolder="transformer", **quant, **kwargs_model)
-                        else:
-                            quantize_unet_after = True
                     kwargs["vae"] = AutoencoderKL.from_pretrained(args.checkpoint, subfolder="vae", **kwargs_vae)
                     PipelineClass = xFuserStableDiffusion3Pipeline
                 case _: raise NotImplementedError
@@ -276,20 +241,22 @@ def initialize():
                 args.ip_adapter = json.loads(args.ip_adapter)
                 load_ip_adapter(pipe, args.ip_adapter)
 
-            # deferred quantize
-            if quantize_unet_after:
-                quantize(pipe.transformer, "transformer")
+            # quantize
+            if args.quantize_to is not None:
+                if hasattr(pipe, "controlnet") and pipe.controlnet is not None:                                 quantize(pipe.controlnet, "controlnet")
+                if hasattr(pipe, "motion_adapter") and pipe.motion_adapter is not None:                         quantize(pipe.motion_adapter, "motion_adapter")
+                if hasattr(pipe, "unet") and pipe.unet is not None and args.gguf_model is None:                 quantize(pipe.unet, "unet")
+                if hasattr(pipe, "transformer") and pipe.transformer is not None and args.gguf_model is None:   quantize(pipe.transformer, "transformer")
+                if hasattr(pipe, "text_encoder") and pipe.text_encoder is not None:                             quantize(pipe.text_encoder, "text_encoder")
+                if hasattr(pipe, "text_encoder_2") and pipe.text_encoder_2 is not None:                         quantize(pipe.text_encoder_2, "text_encoder_2")
+                if hasattr(pipe, "text_encoder_3") and pipe.text_encoder_3 is not None:                         quantize(pipe.text_encoder_3, "text_encoder_3")
+                if hasattr(pipe, "image_encoder") and pipe.image_encoder is not None:                           quantize(pipe.image_encoder, "image_encoder")
+                #if hasattr(pipe, "vae") and pipe.vae is not None:                                               quantize(pipe.vae, "vae")
 
             # set lora
             adapter_names = None
             if args.lora is not None:
                 adapter_names = load_lora(args.lora, pipe, local_rank, logger, (args.quantize_to is not None))
-                if len(to_quantize) > 0:
-                    logger.info("Requantizing transformer, text encoder(s)")
-                    if to_quantize.get("transformer") is not None or quantize_unet_after:   quantize(pipe.transformer, "transformer")
-                    if to_quantize.get("text_encoder") is not None:                         quantize(pipe.text_encoder, "text_encoder")
-                    if to_quantize.get("text_encoder_2") is not None:                       quantize(pipe.text_encoder_2, "text_encoder_2")
-                    if to_quantize.get("text_encoder_3") is not None:                       quantize(pipe.text_encoder_3, "text_encoder_3")
 
             # set scheduler
             set_scheduler(args, pipe)
@@ -410,7 +377,6 @@ def generate_image_parallel(
             kwargs["generator"]                     = generator
             kwargs["guidance_scale"]                = cfg
             kwargs["num_inference_steps"]           = steps
-            # TODO: fix callback/progressbar
             kwargs["callback_on_step_end"]          = set_step_progress
             kwargs["width"]                         = args.width
             kwargs["height"]                        = args.height
