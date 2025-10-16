@@ -135,7 +135,7 @@ def initialize():
 
             # init distributed inference
             # remove all our args before passing it to xdit
-            xargs = copy.deepcopy(args)
+            xargs = copy.copy(args)
             del xargs.checkpoint
             del xargs.gguf_model
             del xargs.scheduler
@@ -146,8 +146,14 @@ def initialize():
             del xargs.lora
             del xargs.compile_unet
             del xargs.compile_vae
-            del xargs.compile_text_encoder
-            del xargs.quantize_to
+            del xargs.compile_encoder
+            del xargs.compile_backend
+            del xargs.compile_mode
+            del xargs.compile_options
+            del xargs.compile_fullgraph_off
+            del xargs.quantize_unet_to
+            del xargs.quantize_text_encoder_to
+            del xargs.quantize_misc_to
             del xargs.vae
             del xargs.control_net
             del xargs.ip_adapter
@@ -163,11 +169,6 @@ def initialize():
             setup_torch_dynamo()
             # torch tweaks
             setup_torch_backends()
-
-            # quantize
-            quant = {}
-            if args.quantize_to is not None:    quant = {"quantization_config": QuantoConfig(weights_dtype=args.quantize_to)}
-            def quantize(model, desc):          do_quantization(model, desc, args.quantize_to, logger)
 
             # set pipeline
             logger.info(f"Initializing pipeline")
@@ -191,23 +192,19 @@ def initialize():
             kwargs_vae["local_files_only"] = True
             kwargs_vae["low_cpu_mem_usage"] = True
 
+            kwargs_gguf = {}
+            kwargs_gguf["torch_dtype"] = torch_dtype
+            kwargs_gguf["use_safetensors"] = False
+            kwargs_gguf["local_files_only"] = True
+            kwargs_gguf["low_cpu_mem_usage"] = True
+            kwargs_gguf["quantization_config"] = GGUFQuantizationConfig(compute_dtype=torch_dtype)
+
             PipelineClass = None
-            to_quantize = {}
-            quantize_unet_after = False
 
             match args.type:
                 case "flux":
                     if args.gguf_model is not None:
-                        kwargs["transformer"] = FluxTransformer2DModel.from_single_file(
-                            args.gguf_model,
-                            config=args.checkpoint,
-                            subfolder="transformer",
-                            torch_dtype=torch_dtype,
-                            # use_safetensors=True,
-                            local_files_only=True,
-                            low_cpu_mem_usage=True,
-                            quantization_config=GGUFQuantizationConfig(compute_dtype=torch_dtype),
-                        )
+                        kwargs["transformer"] = FluxTransformer2DModel.from_single_file(args.gguf_model, config=args.checkpoint, subfolder="transformer", **kwargs_gguf)
                     kwargs["vae"] = AutoencoderKL.from_pretrained(args.checkpoint, subfolder="vae", **kwargs_vae)
                     PipelineClass = xFuserFluxPipeline
                 case "hy":
@@ -228,38 +225,17 @@ def initialize():
             if args.vae is not None:
                 kwargs["vae"] = AutoencoderKL.from_pretrained(args.vae, **kwargs_vae)
 
-            if len(to_quantize) > 0:
-                for k, v in to_quantize.items():
-                    quantize(v, k)
-                    kwargs[k] = v
-
-            pipe = PipelineClass.from_pretrained(args.checkpoint, **quant, **kwargs)
+            # init pipe
+            pipe = PipelineClass.from_pretrained(args.checkpoint, **kwargs)
             logger.info(f"Pipeline initialized")
+
+            # set scheduler
+            set_scheduler(args, pipe)
 
             # set ipadapter
             if args.ip_adapter is not None:
                 args.ip_adapter = json.loads(args.ip_adapter)
                 load_ip_adapter(pipe, args.ip_adapter)
-
-            # quantize
-            if args.quantize_to is not None:
-                if hasattr(pipe, "controlnet") and pipe.controlnet is not None:                                 quantize(pipe.controlnet, "controlnet")
-                if hasattr(pipe, "motion_adapter") and pipe.motion_adapter is not None:                         quantize(pipe.motion_adapter, "motion_adapter")
-                if hasattr(pipe, "unet") and pipe.unet is not None and args.gguf_model is None:                 quantize(pipe.unet, "unet")
-                if hasattr(pipe, "transformer") and pipe.transformer is not None and args.gguf_model is None:   quantize(pipe.transformer, "transformer")
-                if hasattr(pipe, "text_encoder") and pipe.text_encoder is not None:                             quantize(pipe.text_encoder, "text_encoder")
-                if hasattr(pipe, "text_encoder_2") and pipe.text_encoder_2 is not None:                         quantize(pipe.text_encoder_2, "text_encoder_2")
-                if hasattr(pipe, "text_encoder_3") and pipe.text_encoder_3 is not None:                         quantize(pipe.text_encoder_3, "text_encoder_3")
-                if hasattr(pipe, "image_encoder") and pipe.image_encoder is not None:                           quantize(pipe.image_encoder, "image_encoder")
-                #if hasattr(pipe, "vae") and pipe.vae is not None:                                               quantize(pipe.vae, "vae")
-
-            # set lora
-            adapter_names = None
-            if args.lora is not None:
-                adapter_names = load_lora(args.lora, pipe, local_rank, logger, (args.quantize_to is not None))
-
-            # set scheduler
-            set_scheduler(args, pipe)
 
             # set memory saving
             if args.type not in ["sd3"]:
@@ -270,12 +246,36 @@ def initialize():
             elif args.enable_model_cpu_offload:     pipe.enable_model_cpu_offload(gpu_id=local_rank)
             else:                                   pipe = pipe.to(f"cuda:{local_rank}")
 
+            # quantize
+            if args.quantize_unet_to is not None:
+                quantize_helper("transformer", pipe, args.quantize_unet_to, logger)
+            if args.quantize_encoder_to is not None:
+                quantize_helper("encoder", pipe, args.quantize_encoder_to, logger)
+            if args.quantize_misc_to is not None:
+                if hasattr(pipe, "controlnet") and pipe.controlnet is not None:
+                    quantize_helper("manual", pipe, args.quantize_misc_to, logger, manual_module="controlnet")
+                if hasattr(pipe, "motion_adapter") and pipe.motion_adapter is not None:
+                    quantize_helper("manual", pipe, args.quantize_misc_to, logger, manual_module="motion_adapter")
+
+            # set lora
+            adapter_names = None
+            if args.lora is not None:
+                adapter_names = load_lora(args.lora, pipe, local_rank, logger, (args.quantize_to is not None))
+
             # compiles
-            if args.compile_unet:
-                if args.type in "sdxl":         compile_unet(pipe, adapter_names, logger)
-                elif args.gguf_model is None:   compile_transformer(pipe, adapter_names, logger)
-            if args.compile_vae:                compile_vae(pipe, logger)
-            if args.compile_text_encoder:       compile_text_encoder(pipe, logger)
+            if args.compile_unet or args.compile_vae or args.compile_encoder:
+                if args.compile_mode is not None and args.compile_options is not None:
+                    logger.info("Compile mode and options are both defined, will ignore compile mode.")
+                    args.compile_mode = None
+                compiler_config = {}
+                if args.compile_backend is not None:    compiler_config["backend"] = args.compile_backend
+                if args.compile_mode is not None:       compiler_config["mode"] = args.compile_mode
+                if args.compile_options is not None:    compiler_config["options"] = json.loads(args.compile_options)
+                compiler_config["fullgraph"] = (args.compile_fullgraph_off is None or args.compile_fullgraph_off == False)
+                compiler_config["dynamic"] = False
+                if args.compile_unet:                   compile_helper("transformer", pipe, compiler_config, logger, adapter_names=adapter_names)
+                if args.compile_vae:                    ompile_helper("vae", pipe, compiler_config, logger)
+                if args.compile_encoder:                compile_helper("encoder", pipe, compiler_config, logger)
 
             # set progress bar visibility
             pipe.set_progress_bar_config(disable=local_rank != 0)
@@ -420,8 +420,8 @@ def generate_image_parallel(
                 latents = pipe._unpack_latents(latents, args.height, args.width, pipe.vae_scale_factor)
                 # latents = (latents / pipe.vae.config.scaling_factor) + pipe.vae.config.shift_factor
 
-                images = convert_latent_to_image(copy.deepcopy(latents.to(device)), pipe)
-                latents = convert_latent_to_output_latent(copy.deepcopy(latents.to(device)), pipe)
+                images = convert_latent_to_image(copy.copy(latents.to(device)), pipe)
+                latents = convert_latent_to_output_latent(copy.copy(latents.to(device)), pipe)
                 with app.app_context():
                     requests.post(f"http://localhost:{args.port}/set_result", json={ "image": pickle_and_encode_b64(images[0]), "latent": pickle_and_encode_b64(latents) })
 

@@ -153,6 +153,23 @@ patches = [
         ],
     },
     {
+        "file_name": f"{root}/pipelines.py",
+        "replace": [
+            {
+                "from": """torch_dtype = kwargs.pop("torch_dtype", torch.float16)
+        unet = UNet2DConditionModel.from_pretrained(
+            pretrained_model_name_or_path, torch_dtype=torch_dtype, subfolder="unet"
+        ).to(device)""",
+                "to": """torch_dtype = kwargs.pop("torch_dtype", torch.float16)
+        unet = kwargs.pop("unet", None)
+        if unet is None:
+            unet = UNet2DConditionModel.from_pretrained(
+                pretrained_model_name_or_path, torch_dtype=torch_dtype, subfolder="unet"
+            ).to(device)"""
+            },
+        ],
+    },
+    {
         "file_name": f"{root}/utils.py",
         "replace": [
             # Increase torch timeout to 1 day

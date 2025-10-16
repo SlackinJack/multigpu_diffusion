@@ -10,6 +10,7 @@ import torch._dynamo
 import torch.nn.functional as F
 import torchvision.transforms.functional as F2
 from diffusers import EulerAncestralDiscreteScheduler
+from diffusers.loaders.lora_conversion_utils import _convert_non_diffusers_lora_to_diffusers
 from diffusers.utils import load_image
 from diffusers.utils.torch_utils import randn_tensor
 from optimum.quanto import freeze, qfloat8, qint2, qint4, qint8, quantize
@@ -19,10 +20,6 @@ from PIL import Image
 from modules.scheduler_config import get_scheduler, get_scheduler_name
 
 
-config          = json.load(open(os.path.dirname(os.path.abspath(__file__)) + "/../config.json"))
-config_compiler = config["compiler"]
-
-
 GENERIC_HOST_ARGS = {
     "height":               int,
     "width":                int,
@@ -30,7 +27,12 @@ GENERIC_HOST_ARGS = {
     "port":                 int,
     "type":                 str,
     "variant":              str,
-    "quantize_to":          str,
+    "quantize_unet_to":     str,
+    "quantize_encoder_to":  str,
+    "quantize_misc_to":     str,
+    "compile_backend":      str,    # [inductor, eager, ...]
+    "compile_mode":         str,    # [default, reduce-overhead, max-autotune, max-auto-no-cudagraphs...]
+    "compile_options":      str,    # dict > { "triton.cudagraphs": true, ... }
     "checkpoint":           str,    # path
     "gguf_model":           str,    # path
     "motion_module":        str,    # path
@@ -38,9 +40,9 @@ GENERIC_HOST_ARGS = {
     "motion_adapter_lora":  str,    # path
     "control_net":          str,    # path
     "vae":                  str,    # path
-    "scheduler":            str,    # json dict > { "key": value, ... }
-    "lora":                 str,    # json dict > { "path": scale, ... }
-    "ip_adapter":           str,    # json dict > { "path": scale, ... }
+    "scheduler":            str,    # dict > { "key": value, ... }
+    "lora":                 str,    # dict > { "path": scale, ... }
+    "ip_adapter":           str,    # dict > { "path": scale, ... }
 }
 
 
@@ -53,7 +55,8 @@ GENERIC_HOST_ARGS_TOGGLES = [
     "enable_sequential_cpu_offload",
     "compile_unet",
     "compile_vae",
-    "compile_text_encoder",
+    "compile_encoder",
+    "compile_fullgraph_off",
 ]
 
 
@@ -113,15 +116,6 @@ def set_scheduler(args, pipe, is_distrifuser=False):
     return
 
 
-def do_quantization(model, desc, quantize_to, logger):
-    logger.info(f"quantizing {desc} to {quantize_to}")
-    quant = get_encoder_type(quantize_to)
-    quantize(model, weights=quant)
-    freeze(model)
-    logger.info(f"completed {quantize_to} quantization for {desc}")
-    return
-
-
 def load_lora(lora_dict, pipe, rank, logger):
     loras = json.loads(lora_dict)
     names = []
@@ -168,35 +162,90 @@ def get_warmup_image():
     return image
 
 
-def __get_compiler_config():
-    global config_compiler
+def __get_compiler_config(compiler_config):
     return config_compiler["backend"], config_compiler["mode"], config_compiler["fullgraph"]
 
 
-def compile_unet(pipe, adapter_names, logger, is_distrifuser=False):
-    backend, mode, fullgraph = __get_compiler_config()
-    kwargs = {"backend": backend, "fullgraph": fullgraph, "dynamic": False}
-    if len(mode) > 0: kwargs["mode"] = mode
-    logger.info(f"compiling unet with {backend}:{mode}, fullgraph={fullgraph}")
-    if adapter_names:
-        if is_distrifuser:  pipe.unet.model.fuse_lora(adapter_names=adapter_names, lora_scale=1.0)
-        else:               pipe.unet.fuse_lora(adapter_names=adapter_names, lora_scale=1.0)
-        pipe.unload_lora_weights()
-    if is_distrifuser:      pipe.unet.model = torch.compile(pipe.unet.model, **kwargs)
-    else:                   pipe.unet = torch.compile(pipe.unet, **kwargs)
-    logger.info(f"compiled unet")
+def quantize_helper(target, pipe, quantize_to, logger, manual_module=None, is_distrifuser=False):
+    logger.info(f"quantizing {target} to type {quantize_to}")
+    quant = get_encoder_type(quantize_to)
+    match target:
+        case "transformer":
+            quantize(pipe.transformer, weights=quant)
+            freeze(pipe.transformer, weights=quant)
+        case "unet":
+            if is_distrifuser:
+                quantize(pipe.unet.model, weights=quant)
+                freeze(pipe.unet.model)
+            else:
+                quantize(pipe.unet, weights=quant)
+                freeze(pipe.unet)
+        case "encoder":
+            if hasattr(pipe, "text_encoder") and pipe.text_encoder is not None:
+                quantize(pipe.text_encoder, weights=quant)
+                freeze(pipe.text_encoder)
+            if hasattr(pipe, "text_encoder_2") and pipe.text_encoder_2 is not None:
+                quantize(pipe.text_encoder_2, weights=quant)
+                freeze(pipe.text_encoder_2)
+            if hasattr(pipe, "text_encoder_3") and pipe.text_encoder_3 is not None:
+                quantize(pipe.text_encoder_3, weights=quant)
+                freeze(pipe.text_encoder_3)
+            if hasattr(pipe, "image_encoder") and pipe.image_encoder is not None:
+                quantize(pipe.image_encoder, weights=quant)
+                freeze(pipe.image_encoder)
+        case "manual":
+            if manual_module is not None and len(manual_module) > 0:
+                model = getattr(pipe, manual_module, None)
+                if model is not None:
+                    quantize(model, weights=quant)
+                    freeze(model)
+                else:
+                    logger.info(f"{manual_module} not found in given pipeline - not quantizing")
+                    return
+            else:
+                logger.info("no module given for manual target - not quantizing")
+                return
+        case _:
+            logger.info("unknown quantize target - not quantizing")
+            return
+    logger.info(f"completed {quantize_to} quantization for {target}")
     return
 
 
-def compile_transformer(pipe, adapter_names, logger):
-    backend, mode, fullgraph = __get_compiler_config()
-    logger.info(f"compiling transformer with {backend}:{mode}, fullgraph={fullgraph}")
-    if adapter_names:
-        pipe.transformer.fuse_lora(adapter_names=adapter_names, lora_scale=1.0)
-        pipe.unload_lora_weights()
-    if len(mode) > 0:   pipe.transformer = torch.compile(pipe.transformer, backend=backend, mode=mode, fullgraph=fullgraph, dynamic=False)
-    else:               pipe.transformer = torch.compile(pipe.transformer, backend=backend, fullgraph=fullgraph, dynamic=False)
-    logger.info(f"compiled transformer")
+def compile_helper(target, pipe, compile_config, logger, adapter_names=None, is_distrifuser=False):
+    logger.info(f"compiling {target}")
+    match target:
+        case "transformer":
+            if adapter_names is not None:
+                pipe.transformer.fuse_lora(adapter_names=adapter_names, lora_scale=1.0)
+                pipe.unload_lora_weights()
+            pipe.transformer = torch.compile(pipe.transformer, **compile_config)
+        case "unet":
+            if is_distrifuser:
+                pipe.unet.model.fuse_lora(adapter_names=adapter_names, lora_scale=1.0)
+            else:
+                pipe.unet.fuse_lora(adapter_names=adapter_names, lora_scale=1.0)
+            pipe.unload_lora_weights()
+            if is_distrifuser:
+                pipe.unet.model = torch.compile(pipe.unet.model, **compile_config)
+            else:
+                pipe.unet = torch.compile(pipe.unet, **compile_config)
+        case "vae":
+            pipe.vae = torch.compile(pipe.vae, **compile_config)
+        case "encoder":
+            if hasattr(pipe, "text_encoder") and pipe.text_encoder is not None:
+                pipe.text_encoder = torch.compile(pipe.text_encoder, **compile_config)
+            if hasattr(pipe, "text_encoder_2") and pipe.text_encoder_2 is not None:
+                pipe.text_encoder_2 = torch.compile(pipe.text_encoder_2, **compile_config)
+            if hasattr(pipe, "text_encoder_3") and pipe.text_encoder_3 is not None:
+                pipe.text_encoder_3 = torch.compile(pipe.text_encoder_3, **compile_config)
+            if hasattr(pipe, "image_encoder") and pipe.image_encoder is not None:
+                pipe.image_encoder = torch.compile(pipe.image_encoder, **compile_config)
+        case _:
+            logger.info("unknown compile target - not compiling")
+            return
+
+    logger.info(f"compiled compile for {target}")
     return
 
 
@@ -207,24 +256,6 @@ def compile_model(pipe, logger):
     if len(mode) > 0:   pipe.model = torch.compile(pipe.model, backend=backend, mode=mode, fullgraph=fullgraph, dynamic=False)
     else:               pipe.model = torch.compile(pipe.model, backend=backend, fullgraph=fullgraph, dynamic=False)
     logger.info(f"compiled model")
-    return
-
-
-def compile_vae(pipe, logger):
-    backend, mode, fullgraph = __get_compiler_config()
-    logger.info(f"compiling vae with {backend}:{mode}, fullgraph={fullgraph}")
-    if len(mode) > 0:   pipe.vae = torch.compile(pipe.vae, backend=backend, mode=mode, fullgraph=fullgraph, dynamic=False)
-    else:               pipe.vae = torch.compile(pipe.vae, backend=backend, fullgraph=fullgraph, dynamic=False)
-    logger.info(f"compiled vae")
-    return
-
-
-def compile_text_encoder(pipe, logger):
-    backend, mode, fullgraph = __get_compiler_config()
-    logger.info(f"compiling text encoder with {backend}:{mode}, fullgraph={fullgraph}")
-    if len(mode) > 0:   pipe.text_encoder = torch.compile(pipe.text_encoder, backend=backend, mode=mode, fullgraph=fullgraph, dynamic=False)
-    else:               pipe.text_encoder = torch.compile(pipe.text_encoder, backend=backend, fullgraph=fullgraph, dynamic=False)
-    logger.info(f"compiled text encoder")
     return
 
 
@@ -282,20 +313,24 @@ def remove_alpha_from_latent(latents):
 def convert_latent_to_output_latent(latents, pipe, is_distrifuser=False):
     if is_distrifuser:  p = pipe.pipeline
     else:               p = pipe
+    default_vae_dtype = copy.copy(p.vae.dtype)
+    p.vae = p.vae.to(torch.float32)
     latents = latents.to(torch.float32)
     latents = latents / p.vae.config.scaling_factor
     latents = add_alpha_to_latent(latents)
+    p.vae = p.vae.to(default_vae_dtype)
     return latents
 
 
 def convert_latent_to_image(latents, pipe, is_distrifuser=False):
     if is_distrifuser:  p = pipe.pipeline
     else:               p = pipe
-    default_pipe_dtype = copy.deepcopy(p.vae.dtype)
+    default_vae_dtype = copy.copy(p.vae.dtype)
+    p.vae = p.vae.to(torch.float32)
     latents = latents.to(torch.float32)
     latents = latents / p.vae.config.scaling_factor
     latents = add_alpha_to_latent(latents)
     latents = p.vae.decode(latents, return_dict=False)[0]
-    image = p.image_processor.postprocess(latents, output_type="pil")
-    p.vae = p.vae.to(default_pipe_dtype)
-    return image
+    latents = p.image_processor.postprocess(latents, output_type="pil")
+    p.vae = p.vae.to(default_vae_dtype)
+    return latents

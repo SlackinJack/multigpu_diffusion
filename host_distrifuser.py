@@ -7,7 +7,7 @@ import torch._dynamo
 import torch.distributed as dist
 import torch.multiprocessing as mp
 from compel import Compel, ReturnedEmbeddingsType
-from DeepCache import DeepCacheSDHelper
+#from DeepCache import DeepCacheSDHelper
 from diffusers import (
     AutoencoderKL,
     QuantoConfig,
@@ -34,8 +34,8 @@ step_progress = 0
 local_rank = None
 logger = None
 pipe = None
-can_cache = False # TODO: fix pipe has no attr 'unet'
-cache_kwargs = { "cache_interval": 3, "cache_branch_id": 0 }
+#can_cache = False # TODO: fix pipe has no attr 'unet'
+#cache_kwargs = { "cache_interval": 3, "cache_branch_id": 0 }
 
 
 def get_args():
@@ -46,13 +46,13 @@ def get_args():
     parser.add_argument("--parallelism", type=str, default="patch", choices=["patch", "tensor", "naive_patch"])
     parser.add_argument("--split_scheme", type=str, default="row", choices=["row", "col", "alternate"])
     parser.add_argument("--sync_mode", type=str, default="corrected_async_gn", choices=[
-                                                                                            "separate_gn",
-                                                                                            "stale_gn",
-                                                                                            "corrected_async_gn",
-                                                                                            "sync_gn",
-                                                                                            "full_sync",
-                                                                                            "no_sync"
-                                                                                        ])
+                                                                                        "separate_gn",
+                                                                                        "stale_gn",
+                                                                                        "corrected_async_gn",
+                                                                                        "sync_gn",
+                                                                                        "full_sync",
+                                                                                        "no_sync"
+                                                                                       ])
     # generic
     for k, v in GENERIC_HOST_ARGS.items():  parser.add_argument(f"--{k}", type=v, default=None)
     for e in GENERIC_HOST_ARGS_TOGGLES:     parser.add_argument(f"--{e}", action="store_true")
@@ -76,7 +76,7 @@ def check_progress():
 def initialize():
     with torch.no_grad():
         with torch.amp.autocast("cuda", enabled=False):
-            global pipe, local_rank, initialized, can_cache, cache_kwargs, logger
+            global pipe, local_rank, initialized, logger #, can_cache, cache_kwargs
             args = get_args()
 
             # checks
@@ -94,11 +94,6 @@ def initialize():
 
             # set torch type
             torch_dtype = get_torch_type(args.variant)
-
-            # quantize
-            quant = {}
-            if args.quantize_to is not None:    quant = {"quantization_config": QuantoConfig(weights_dtype=args.quantize_to)}
-            def quantize(model, desc):          do_quantization(model, desc, args.quantize_to, logger)
 
             # set distrifuser
             warmup_steps = 0 if args.warm_up_steps is None else args.warm_up_steps
@@ -137,9 +132,6 @@ def initialize():
             kwargs_vae["local_files_only"] = True
             kwargs_vae["low_cpu_mem_usage"] = True
 
-            to_quantize = {}
-            quantize_unet_after = False
-
             match args.type:
                 case "sdxl":
                     kwargs["vae"] = AutoencoderKL.from_pretrained(args.checkpoint, subfolder="vae", **kwargs_vae)
@@ -147,33 +139,23 @@ def initialize():
                 case _:
                     kwargs["vae"] = AutoencoderKL.from_pretrained(args.checkpoint, subfolder="vae", **kwargs_vae)
                     PipelineClass = DistriSDPipeline
+            kwargs["unet"] = UNet2DConditionModel.from_pretrained(args.checkpoint, subfolder="unet", **kwargs_model)
 
             # set vae
             if args.vae is not None:
                 kwargs["vae"] = AutoencoderKL.from_pretrained(args.vae, **kwargs_vae)
 
-            pipe = PipelineClass.from_pretrained(distri_config=distri_config, **quant, **kwargs)
+            # init pipe
+            pipe = PipelineClass.from_pretrained(distri_config=distri_config, **kwargs)
             logger.info(f"Pipeline initialized")
+
+            # set scheduler
+            set_scheduler(args, pipe, is_distrifuser=True)
 
             # set ipadapter
             if args.ip_adapter is not None:
                 args.ip_adapter = json.loads(args.ip_adapter)
                 load_ip_adapter(pipe, args.ip_adapter)
-
-            # quantize
-            if args.quantize_to is not None:
-                if hasattr(pipe.pipeline, "unet"): quantize(pipe.pipeline.unet.model, "unet")
-                if hasattr(pipe.pipeline, "text_encoder"): quantize(pipe.pipeline.text_encoder, "text_encoder")
-                if hasattr(pipe.pipeline, "text_encoder_2"): quantize(pipe.pipeline.text_encoder_2, "text_encoder_2")
-                if hasattr(pipe.pipeline, "vae"): quantize(pipe.pipeline.vae, "vae")
-
-            # set lora
-            adapter_names = None
-            if args.lora is not None:
-                adapter_names = load_lora(args.lora, pipe.pipeline, local_rank, logger)
-
-            # set scheduler
-            set_scheduler(args, pipe, is_distrifuser=True)
 
             # set memory saving
             if args.enable_vae_slicing:             pipe.pipeline.vae.enable_slicing()
@@ -182,10 +164,33 @@ def initialize():
             if args.enable_sequential_cpu_offload:  logger.info("sequential CPU offload not supported - ignoring")
             if args.enable_model_cpu_offload:       logger.info("model CPU offload not supported - ignoring")
 
+            # quantize
+            if args.quantize_unet_to is not None:
+                quantize_helper("unet", pipe, args.quantize_unet_to, logger, is_distrifuser=True)
+            if args.quantize_encoder_to is not None:
+                quantize_helper("encoder", pipe, args.quantize_encoder_to, logger)
+            if args.quantize_misc_to is not None:
+                pass
+
+            # set lora
+            adapter_names = None
+            if args.lora is not None:
+                adapter_names = load_lora(args.lora, pipe.pipeline, local_rank, logger)
+
             # compiles
-            if args.compile_unet:           compile_unet(pipe.pipeline, adapter_names, logger, is_distrifuser=True)
-            if args.compile_vae:            compile_vae(pipe.pipeline, logger)
-            if args.compile_text_encoder:   compile_text_encoder(pipe.pipeline, logger)
+            if args.compile_unet or args.compile_vae or args.compile_encoder:
+                if args.compile_mode is not None and args.compile_options is not None:
+                    logger.info("Compile mode and options are both defined, will ignore compile mode.")
+                    args.compile_mode = None
+                compiler_config = {}
+                if args.compile_backend is not None:    compiler_config["backend"] = args.compile_backend
+                if args.compile_mode is not None:       compiler_config["mode"] = args.compile_mode
+                if args.compile_options is not None:    compiler_config["options"] = json.loads(args.compile_options)
+                compiler_config["fullgraph"] = (args.compile_fullgraph_off is None or args.compile_fullgraph_off == False)
+                compiler_config["dynamic"] = False
+                if args.compile_unet:                   compile_helper("unet", pipe, compiler_config, logger, adapter_names=adapter_names)
+                if args.compile_vae:                    compile_helper("vae", pipe, compiler_config, logger)
+                if args.compile_encoder:                compile_helper("encoder", pipe, compiler_config, logger)
 
             # set progress bar visibility
             pipe.set_progress_bar_config(disable=distri_config.rank != 0)
@@ -196,10 +201,10 @@ def initialize():
             # warm up run
             if args.warm_up_steps is not None and args.warm_up_steps > 0:
                 logger.info("Starting warmup run")
-                if can_cache:
-                    helper = DeepCacheSDHelper(pipe=pipe)
-                    helper.set_params(**cache_kwargs)
-                    helper.enable()
+                #if can_cache:
+                #    helper = DeepCacheSDHelper(pipe=pipe)
+                #    helper.set_params(**cache_kwargs)
+                #    helper.enable()
                 kwargs = {}
                 kwargs["prompt"] = "a dog"
                 kwargs["num_inference_steps"] = args.warm_up_steps
@@ -211,8 +216,9 @@ def initialize():
                 pipe.pipeline.vae = pipe.pipeline.vae.to(torch_dtype)
                 pipe(**kwargs)
                 pipe.pipeline.vae = pipe.pipeline.vae.to(torch.float32)
-                if can_cache:
-                    helper.disable()
+                #if can_cache:
+                #    helper.disable()
+                #    del helper
 
             # clean up
             clean()
@@ -242,7 +248,7 @@ def generate_image_parallel(
 ):
     with torch.no_grad():
         with torch.amp.autocast("cuda", enabled=False):
-            global pipe, local_rank, step_progress, can_cache, cache_kwargs
+            global pipe, local_rank, step_progress #, can_cache, cache_kwargs
             args = get_args()
             device = torch.device("cuda", torch.cuda.current_device())
             torch_dtype = get_torch_type(args.variant)
@@ -323,13 +329,14 @@ def generate_image_parallel(
                 else:
                     return "No IPAdapter image provided for a IPAdapter-loaded pipeline", None, False
 
-            if can_cache:
-                helper = DeepCacheSDHelper(pipe=pipe)
-                helper.set_params(**cache_kwargs)
-                helper.enable()
+            #if can_cache:
+            #    helper = DeepCacheSDHelper(pipe=pipe)
+            #    helper.set_params(**cache_kwargs)
+            #    helper.enable()
             output = pipe(**kwargs)
-            if can_cache:
-                helper.disable()
+            #if can_cache:
+            #    helper.disable()
+            #    del helper
 
             if args.compel:
                 # https://github.com/damian0815/compel/issues/24
@@ -359,10 +366,9 @@ def generate_image_parallel(
                 output = pickle.loads(output_bytes.cpu().numpy().tobytes())
                 if output is not None:
                     step_progress = 100
-                    images = convert_latent_to_image(copy.deepcopy(output.images.to(device)), pipe, is_distrifuser=True)
-                    latents = convert_latent_to_output_latent(copy.deepcopy(output.images.to(device)), pipe, is_distrifuser=True)
+                    images = convert_latent_to_image(copy.copy(output.images.to(device)), pipe, is_distrifuser=True)
+                    latents = convert_latent_to_output_latent(copy.copy(output.images.to(device)), pipe, is_distrifuser=True)
                     return "OK", { "image": pickle_and_encode_b64(images[0]), "latent": pickle_and_encode_b64(latents) }, True
-                    # return "OK", pickle_and_encode_b64(output.images[0]), True
                 else:
                     return "No image from pipeline", None, True
 
