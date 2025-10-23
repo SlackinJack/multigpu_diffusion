@@ -29,15 +29,15 @@ python3 scripts/PatchDistriFuser.py
 
 
 
-echo ""
-echo "########## Clone Wan2.1 ##########"
-echo ""
-bash scripts/clone_wan_repo.sh
+#echo ""
+#echo "########## Clone Wan2.1 ##########"
+#echo ""
+#bash scripts/clone_wan_repo.sh
 
-echo ""
-echo "########## Patching WAN2.1 ##########"
-echo ""
-python3 scripts/PatchWan.py
+#echo ""
+#echo "########## Patching WAN2.1 ##########"
+#echo ""
+#python3 scripts/PatchWan.py
 
 
 

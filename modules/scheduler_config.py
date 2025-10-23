@@ -79,6 +79,27 @@ def get_scheduler_name(scheduler):
         case _:                                 raise NotImplementedError
 
 
+def get_scheduler_supports_setting_timesteps_or_sigmas(scheduler):
+    return get_scheduler_supports_setting_timesteps(scheduler) or get_scheduler_supports_setting_sigmas(scheduler)
+
+
+def get_scheduler_supports_setting_timesteps(scheduler):
+    supported = ["dpmpp_2m", "dpmpp_sde", "ddpm", "euler", "heun", "tcd"]
+    return get_scheduler_name(scheduler) in supported
+
+
+def get_scheduler_supports_setting_sigmas(scheduler):
+    supported = ["euler"]
+    return get_scheduler_name(scheduler) in supported
+
+
+def get_scheduler_progressbar_offset_index(scheduler, index):
+    schedulers = { "heun": 0.5 }
+    s = get_scheduler_name(scheduler)
+    if s in schedulers.keys(): return index * schedulers[s]
+    return index
+
+
 def get_scheduler_config(scheduler_dict, current_scheduler_config):
     for k, v in scheduler_dict.items():
         if k == "scheduler": continue

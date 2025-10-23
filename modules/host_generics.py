@@ -17,32 +17,34 @@ from optimum.quanto import freeze, qfloat8, qint2, qint4, qint8, quantize
 from PIL import Image
 
 
-from modules.scheduler_config import get_scheduler, get_scheduler_name
+from modules.scheduler_config import get_scheduler, get_scheduler_name,  get_scheduler_supports_setting_timesteps, get_scheduler_supports_setting_sigmas
 
 
 GENERIC_HOST_ARGS = {
-    "height":               int,
-    "width":                int,
-    "warm_up_steps":        int,
-    "port":                 int,
-    "type":                 str,
-    "variant":              str,
-    "quantize_unet_to":     str,
-    "quantize_encoder_to":  str,
-    "quantize_misc_to":     str,
-    "compile_backend":      str,    # [inductor, eager, ...]
-    "compile_mode":         str,    # [default, reduce-overhead, max-autotune, max-auto-no-cudagraphs...]
-    "compile_options":      str,    # dict > { "triton.cudagraphs": true, ... }
-    "checkpoint":           str,    # path
-    "gguf_model":           str,    # path
-    "motion_module":        str,    # path
-    "motion_adapter":       str,    # path
-    "motion_adapter_lora":  str,    # path
-    "control_net":          str,    # path
-    "vae":                  str,    # path
-    "scheduler":            str,    # dict > { "key": value, ... }
-    "lora":                 str,    # dict > { "path": scale, ... }
-    "ip_adapter":           str,    # dict > { "path": scale, ... }
+    "height":                       int,
+    "width":                        int,
+    "warm_up_steps":                int,
+    "port":                         int,
+    "type":                         str,
+    "variant":                      str,
+    "quantize_unet_to":             str,
+    "quantize_encoder_to":          str,
+    "quantize_misc_to":             str,
+    "compile_backend":              str,    # [inductor, eager, ...]
+    "compile_mode":                 str,    # [default, reduce-overhead, max-autotune, max-auto-no-cudagraphs, ...]
+    "compile_options":              str,    # dict > { "triton.cudagraphs": true, ... }
+    "checkpoint":                   str,    # path
+    "gguf_model":                   str,    # path
+    "motion_module":                str,    # path
+    "motion_adapter":               str,    # path
+    "motion_adapter_lora":          str,    # path
+    "control_net":                  str,    # path
+    "vae":                          str,    # path
+    "scheduler":                    str,    # dict > { "key": value, ... }
+    "lora":                         str,    # dict > { "path": scale, ... }
+    "ip_adapter":                   str,    # dict > { "path": scale, ... }
+    "torch_cache_limit":            int,
+    "torch_accumlated_cache_limit": int,
 }
 
 
@@ -57,6 +59,7 @@ GENERIC_HOST_ARGS_TOGGLES = [
     "compile_vae",
     "compile_encoder",
     "compile_fullgraph_off",
+    "torch_capture_scalar",
 ]
 
 
@@ -66,12 +69,15 @@ def clean():
     return
 
 
-def setup_torch_dynamo():
+def setup_torch_dynamo(cache_size_limit, accumulated_cache_size_limit, capture_scalar_outputs):
+    if cache_size_limit == None:                cache_size_limit = 8
+    if accumulated_cache_size_limit == None:    accumulated_cache_size_limit = 64
+    if capture_scalar_outputs == None:          capture_scalar_outputs = False
     # TODO: config.json
     #torch._dynamo.config.suppress_errors = True
-    #torch._dynamo.config.capture_scalar_outputs = False
-    torch._dynamo.config.cache_size_limit = int(8 * 4)
-    torch._dynamo.config.accumulated_cache_size_limit = int(64 * 4)
+    torch._dynamo.config.cache_size_limit = cache_size_limit
+    torch._dynamo.config.accumulated_cache_size_limit = accumulated_cache_size_limit
+    torch._dynamo.config.capture_scalar_outputs = capture_scalar_outputs
     return
 
 
@@ -167,8 +173,11 @@ def __get_compiler_config(compiler_config):
 
 
 def quantize_helper(target, pipe, quantize_to, logger, manual_module=None, is_distrifuser=False):
-    logger.info(f"quantizing {target} to type {quantize_to}")
     quant = get_encoder_type(quantize_to)
+    if quant is None:
+        logger.info(f"unknown quantize type {quantize_to} - not quantizing")
+        return
+    logger.info(f"quantizing {target} to type {quantize_to}")
     match target:
         case "transformer":
             quantize(pipe.transformer, weights=quant)
@@ -291,7 +300,7 @@ def process_input_latent(latents, pipe, dtype, device, timestep=None, is_distrif
 
     target = 255
     latents = normalize_latent(latents, max_val=target)
-    latents = latents * 68.5 / 100
+    #latents = latents * (68.5 / 100)
 
     latents = latents.to(dtype)
     return latents
@@ -310,27 +319,31 @@ def remove_alpha_from_latent(latents):
     return latents
 
 
+def process_latent_for_output(latents, pipe, is_latent_output):
+    default_vae_dtype = copy.copy(pipe.vae.dtype)
+    pipe.vae = pipe.vae.to(torch.float32)
+    latents = latents.to(torch.float32)
+    latents = latents / pipe.vae.config.scaling_factor
+    latents = add_alpha_to_latent(latents)
+    latents = latents * (85.0 / 100)
+    if is_latent_output:
+        pipe.vae = pipe.vae.to(default_vae_dtype)
+        return latents
+    latents = pipe.vae.decode(latents, return_dict=False)[0]
+    latents = pipe.image_processor.postprocess(latents, output_type="pil")
+    pipe.vae = pipe.vae.to(default_vae_dtype)
+    return latents
+
+
 def convert_latent_to_output_latent(latents, pipe, is_distrifuser=False):
     if is_distrifuser:  p = pipe.pipeline
     else:               p = pipe
-    default_vae_dtype = copy.copy(p.vae.dtype)
-    p.vae = p.vae.to(torch.float32)
-    latents = latents.to(torch.float32)
-    latents = latents / p.vae.config.scaling_factor
-    latents = add_alpha_to_latent(latents)
-    p.vae = p.vae.to(default_vae_dtype)
+    latents = process_latent_for_output(latents, p, True)
     return latents
 
 
 def convert_latent_to_image(latents, pipe, is_distrifuser=False):
     if is_distrifuser:  p = pipe.pipeline
     else:               p = pipe
-    default_vae_dtype = copy.copy(p.vae.dtype)
-    p.vae = p.vae.to(torch.float32)
-    latents = latents.to(torch.float32)
-    latents = latents / p.vae.config.scaling_factor
-    latents = add_alpha_to_latent(latents)
-    latents = p.vae.decode(latents, return_dict=False)[0]
-    latents = p.image_processor.postprocess(latents, output_type="pil")
-    p.vae = p.vae.to(default_vae_dtype)
+    latents = process_latent_for_output(latents, p, False)
     return latents

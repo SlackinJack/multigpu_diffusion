@@ -7,7 +7,6 @@ import torch._dynamo
 import torch.distributed as dist
 import torch.multiprocessing as mp
 from compel import Compel, ReturnedEmbeddingsType
-#from DeepCache import DeepCacheSDHelper
 from diffusers import (
     AutoencoderKL,
     QuantoConfig,
@@ -34,8 +33,6 @@ step_progress = 0
 local_rank = None
 logger = None
 pipe = None
-#can_cache = False # TODO: fix pipe has no attr 'unet'
-#cache_kwargs = { "cache_interval": 3, "cache_branch_id": 0 }
 
 
 def get_args():
@@ -45,14 +42,7 @@ def get_args():
     parser.add_argument("--no_split_batch", action="store_true")
     parser.add_argument("--parallelism", type=str, default="patch", choices=["patch", "tensor", "naive_patch"])
     parser.add_argument("--split_scheme", type=str, default="row", choices=["row", "col", "alternate"])
-    parser.add_argument("--sync_mode", type=str, default="corrected_async_gn", choices=[
-                                                                                        "separate_gn",
-                                                                                        "stale_gn",
-                                                                                        "corrected_async_gn",
-                                                                                        "sync_gn",
-                                                                                        "full_sync",
-                                                                                        "no_sync"
-                                                                                       ])
+    parser.add_argument("--sync_mode", type=str, default="corrected_async_gn", choices=["separate_gn", "stale_gn", "corrected_async_gn", "sync_gn", "full_sync", "no_sync"])
     # generic
     for k, v in GENERIC_HOST_ARGS.items():  parser.add_argument(f"--{k}", type=v, default=None)
     for e in GENERIC_HOST_ARGS_TOGGLES:     parser.add_argument(f"--{e}", action="store_true")
@@ -76,7 +66,7 @@ def check_progress():
 def initialize():
     with torch.no_grad():
         with torch.amp.autocast("cuda", enabled=False):
-            global pipe, local_rank, initialized, logger #, can_cache, cache_kwargs
+            global pipe, local_rank, initialized, logger
             args = get_args()
 
             # checks
@@ -87,8 +77,9 @@ def initialize():
             local_rank = int(os.environ.get("LOCAL_RANK", 0))
             torch.cuda.set_device(local_rank)
             logger = get_logger(local_rank)
+
             # dynamo tweaks
-            setup_torch_dynamo()
+            setup_torch_dynamo(args.torch_cache_limit, args.torch_accumlated_cache_limit, args.torch_capture_scalar)
             # torch tweaks
             setup_torch_backends()
 
@@ -165,12 +156,9 @@ def initialize():
             if args.enable_model_cpu_offload:       logger.info("model CPU offload not supported - ignoring")
 
             # quantize
-            if args.quantize_unet_to is not None:
-                quantize_helper("unet", pipe, args.quantize_unet_to, logger, is_distrifuser=True)
-            if args.quantize_encoder_to is not None:
-                quantize_helper("encoder", pipe, args.quantize_encoder_to, logger)
-            if args.quantize_misc_to is not None:
-                pass
+            if args.quantize_unet_to is not None:       quantize_helper("unet", pipe, args.quantize_unet_to, logger, is_distrifuser=True)
+            if args.quantize_encoder_to is not None:    quantize_helper("encoder", pipe, args.quantize_encoder_to, logger)
+            if args.quantize_misc_to is not None:       pass
 
             # set lora
             adapter_names = None
@@ -201,10 +189,6 @@ def initialize():
             # warm up run
             if args.warm_up_steps is not None and args.warm_up_steps > 0:
                 logger.info("Starting warmup run")
-                #if can_cache:
-                #    helper = DeepCacheSDHelper(pipe=pipe)
-                #    helper.set_params(**cache_kwargs)
-                #    helper.enable()
                 kwargs = {}
                 kwargs["prompt"] = "a dog"
                 kwargs["num_inference_steps"] = args.warm_up_steps
@@ -216,9 +200,6 @@ def initialize():
                 pipe.pipeline.vae = pipe.pipeline.vae.to(torch_dtype)
                 pipe(**kwargs)
                 pipe.pipeline.vae = pipe.pipeline.vae.to(torch.float32)
-                #if can_cache:
-                #    helper.disable()
-                #    del helper
 
             # clean up
             clean()
@@ -248,7 +229,7 @@ def generate_image_parallel(
 ):
     with torch.no_grad():
         with torch.amp.autocast("cuda", enabled=False):
-            global pipe, local_rank, step_progress #, can_cache, cache_kwargs
+            global pipe, local_rank, step_progress
             args = get_args()
             device = torch.device("cuda", torch.cuda.current_device())
             torch_dtype = get_torch_type(args.variant)
@@ -281,19 +262,14 @@ def generate_image_parallel(
                     truncate_long_prompts=False,
                 )
                 positive_embeds, positive_pooled_embeds = compel([positive])
-                if negative is not None and len(negative) > 0:
-                    negative_embeds, negative_pooled_embeds = compel([negative])
-                positive = None
-                negative = None
+                if negative is not None and len(negative) > 0:  negative_embeds, negative_pooled_embeds = compel([negative])
+                positive = negative = None
 
             def set_step_progress(pipe, index, timestep, callback_kwargs):
                 global get_torch_type, logger, process_input_latent, step_progress
                 nonlocal args, denoise, device, latent, steps, torch_dtype
                 scheduler_name = get_scheduler_name(pipe.scheduler)
-                if scheduler_name in ["heun"]:
-                    the_index = int(index / 2)
-                else:
-                    the_index = index
+                the_index = get_scheduler_progressbar_offset_index(pipe.scheduler, index)
                 step_progress = the_index / steps * 100
                 if latent is not None:
                     if denoise is None or denoise > 1.0:
@@ -307,36 +283,28 @@ def generate_image_parallel(
 
             generator = torch.Generator(device="cpu").manual_seed(seed)
 
-            kwargs                                  = {}
-            kwargs["generator"]                     = generator
-            kwargs["guidance_scale"]                = cfg
-            kwargs["num_inference_steps"]           = steps
-            kwargs["callback_on_step_end"]          = set_step_progress
-            kwargs["output_type"]                   = "latent"
-            if positive is not None:                kwargs["prompt"]                    = positive
-            if negative is not None:                kwargs["negative_prompt"]           = negative
-            if positive_embeds is not None:         kwargs["prompt_embeds"]             = positive_embeds
-            if positive_pooled_embeds is not None:  kwargs["pooled_prompt_embeds"]      = positive_pooled_embeds
-            if negative_embeds is not None:         kwargs["negative_embeds"]           = negative_embeds
-            if negative_pooled_embeds is not None:  kwargs["negative_pooled_embeds"]    = negative_pooled_embeds
-            if clip_skip is not None:               kwargs["clip_skip"]                 = clip_skip
-            if sigmas is not None:                  kwargs["sigmas"]                    = sigmas
-            if timesteps is not None:               kwargs["timesteps"]                 = timesteps
-            if denoising_end is not None:           kwargs["denoising_end"]             = denoising_end
+            kwargs                                          = {}
+            kwargs["generator"]                             = generator
+            kwargs["guidance_scale"]                        = cfg
+            kwargs["num_inference_steps"]                   = steps
+            kwargs["callback_on_step_end"]                  = set_step_progress
+            kwargs["callback_on_step_end_tensor_inputs"]    = ["latents"]
+            kwargs["output_type"]                           = "latent"
+            if positive is not None:                        kwargs["prompt"]                    = positive
+            if negative is not None:                        kwargs["negative_prompt"]           = negative
+            if positive_embeds is not None:                 kwargs["prompt_embeds"]             = positive_embeds
+            if positive_pooled_embeds is not None:          kwargs["pooled_prompt_embeds"]      = positive_pooled_embeds
+            if negative_embeds is not None:                 kwargs["negative_embeds"]           = negative_embeds
+            if negative_pooled_embeds is not None:          kwargs["negative_pooled_embeds"]    = negative_pooled_embeds
+            if clip_skip is not None:                       kwargs["clip_skip"]                 = clip_skip
+            if sigmas is not None:                          kwargs["sigmas"]                    = sigmas
+            if timesteps is not None:                       kwargs["timesteps"]                 = timesteps
+            if denoising_end is not None:                   kwargs["denoising_end"]             = denoising_end
             if args.ip_adapter is not None:
-                if ip_image is not None:
-                    kwargs["ip_adapter_image"] = ip_image
-                else:
-                    return "No IPAdapter image provided for a IPAdapter-loaded pipeline", None, False
+                if ip_image is not None:    kwargs["ip_adapter_image"] = ip_image
+                else:                       return "No IPAdapter image provided for a IPAdapter-loaded pipeline", None, False
 
-            #if can_cache:
-            #    helper = DeepCacheSDHelper(pipe=pipe)
-            #    helper.set_params(**cache_kwargs)
-            #    helper.enable()
             output = pipe(**kwargs)
-            #if can_cache:
-            #    helper.disable()
-            #    del helper
 
             if args.compel:
                 # https://github.com/damian0815/compel/issues/24

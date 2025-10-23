@@ -160,13 +160,16 @@ def initialize():
             del xargs.motion_adapter_lora
             del xargs.motion_adapter
             del xargs.motion_module
+            del xargs.torch_cache_limit
+            del xargs.torch_accumlated_cache_limit
+            del xargs.torch_capture_scalar
             engine_args = xFuserArgs.from_cli_args(xargs)
             engine_config, input_config = engine_args.create_config()
             engine_config.runtime_config.dtype = torch_dtype
             local_rank = int(os.environ.get("LOCAL_RANK"))
             logger = get_logger(local_rank)
             # dynamo tweaks
-            setup_torch_dynamo()
+            setup_torch_dynamo(args.torch_cache_limit, args.torch_accumlated_cache_limit, args.torch_capture_scalar)
             # torch tweaks
             setup_torch_backends()
 
@@ -267,12 +270,12 @@ def initialize():
                 if args.compile_mode is not None and args.compile_options is not None:
                     logger.info("Compile mode and options are both defined, will ignore compile mode.")
                     args.compile_mode = None
-                compiler_config = {}
+                compiler_config                         = {}
+                compiler_config["fullgraph"]            = (args.compile_fullgraph_off is None or args.compile_fullgraph_off == False)
+                compiler_config["dynamic"]              = False
                 if args.compile_backend is not None:    compiler_config["backend"] = args.compile_backend
                 if args.compile_mode is not None:       compiler_config["mode"] = args.compile_mode
                 if args.compile_options is not None:    compiler_config["options"] = json.loads(args.compile_options)
-                compiler_config["fullgraph"] = (args.compile_fullgraph_off is None or args.compile_fullgraph_off == False)
-                compiler_config["dynamic"] = False
                 if args.compile_unet:                   compile_helper("transformer", pipe, compiler_config, logger, adapter_names=adapter_names)
                 if args.compile_vae:                    ompile_helper("vae", pipe, compiler_config, logger)
                 if args.compile_encoder:                compile_helper("encoder", pipe, compiler_config, logger)
@@ -354,11 +357,7 @@ def generate_image_parallel(
                 global get_torch_type, logger, process_input_latent, step_progress
                 nonlocal args, denoise, device, latent, steps, torch_dtype
                 # TODO: support xfuser-wrapped schedulers
-                #scheduler_name = get_scheduler_name(pipe.scheduler)
-                #if scheduler_name in ["heun"]:
-                #    the_index = int(index / 2)
-                #else:
-                #    the_index = index
+                #the_index = get_scheduler_progressbar_offset_index(pipe.scheduler, index)
                 step_progress = index / steps * 100
                 if latent is not None:
                     if denoise is None or denoise > 1.0:
@@ -372,28 +371,29 @@ def generate_image_parallel(
 
             generator = torch.Generator(device="cpu").manual_seed(seed)
 
-            is_image                                = True
-            kwargs                                  = {}
-            kwargs["generator"]                     = generator
-            kwargs["guidance_scale"]                = cfg
-            kwargs["num_inference_steps"]           = steps
-            kwargs["callback_on_step_end"]          = set_step_progress
-            kwargs["width"]                         = args.width
-            kwargs["height"]                        = args.height
-            kwargs["max_sequence_length"]           = 256
-            kwargs["output_type"]                   = "latent"
-            kwargs["use_resolution_binning"]        = input_config.use_resolution_binning
-            if positive is not None:                kwargs["prompt"]                    = positive
-            if negative is not None:                kwargs["negative_prompt"]           = negative
-            if positive_embeds is not None:         kwargs["prompt_embeds"]             = positive_embeds
-            if positive_pooled_embeds is not None:  kwargs["pooled_prompt_embeds"]      = positive_pooled_embeds
-            if negative_embeds is not None:         kwargs["negative_embeds"]           = negative_embeds
-            if negative_pooled_embeds is not None:  kwargs["negative_pooled_embeds"]    = negative_pooled_embeds
-            if latent is not None:                  kwargs["latents"]                   = latent
-            if clip_skip is not None:               kwargs["clip_skip"]                 = clip_skip
-            if sigmas is not None:                  kwargs["sigmas"]                    = sigmas
-            if timesteps is not None:               kwargs["timesteps"]                 = timesteps
-            if denoising_end is not None:           kwargs["denoising_end"]             = denoising_end
+            is_image                                        = True
+            kwargs                                          = {}
+            kwargs["generator"]                             = generator
+            kwargs["guidance_scale"]                        = cfg
+            kwargs["num_inference_steps"]                   = steps
+            kwargs["callback_on_step_end"]                  = set_step_progress
+            kwargs["callback_on_step_end_tensor_inputs"]    = ["latents"]
+            kwargs["width"]                                 = args.width
+            kwargs["height"]                                = args.height
+            kwargs["max_sequence_length"]                   = 256
+            kwargs["output_type"]                           = "latent"
+            kwargs["use_resolution_binning"]                = input_config.use_resolution_binning
+            if positive is not None:                        kwargs["prompt"]                    = positive
+            if negative is not None:                        kwargs["negative_prompt"]           = negative
+            if positive_embeds is not None:                 kwargs["prompt_embeds"]             = positive_embeds
+            if positive_pooled_embeds is not None:          kwargs["pooled_prompt_embeds"]      = positive_pooled_embeds
+            if negative_embeds is not None:                 kwargs["negative_embeds"]           = negative_embeds
+            if negative_pooled_embeds is not None:          kwargs["negative_pooled_embeds"]    = negative_pooled_embeds
+            if latent is not None:                          kwargs["latents"]                   = latent
+            if clip_skip is not None:                       kwargs["clip_skip"]                 = clip_skip
+            if sigmas is not None:                          kwargs["sigmas"]                    = sigmas
+            if timesteps is not None:                       kwargs["timesteps"]                 = timesteps
+            if denoising_end is not None:                   kwargs["denoising_end"]             = denoising_end
             if args.ip_adapter is not None:
                 if ip_image is not None:
                     kwargs["ip_adapter_image"] = ip_image

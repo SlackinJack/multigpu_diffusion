@@ -8,7 +8,6 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 import torchvision.transforms as transforms
 from compel import Compel, ReturnedEmbeddingsType
-#from DeepCache import DeepCacheSDHelper
 from diffusers import (
     AnimateDiffControlNetPipeline,
     AnimateDiffPipeline,
@@ -51,15 +50,14 @@ local_rank = None
 logger = None
 pipe = None
 can_cache = False
-#cache_kwargs = { "cache_interval": 3, "cache_branch_id": 0 }
 
 
 def get_args():
     parser = argparse.ArgumentParser()
     # asyncdiff
-    parser.add_argument("--model_n", type=int, default=2, choices=[2, 3, 4])
-    parser.add_argument("--stride", type=int, default=1, choices=[1, 2])
-    parser.add_argument("--warm_up", type=int, default=3)
+    parser.add_argument("--model_n",    type=int,   default=2,  choices=[2, 3, 4])
+    parser.add_argument("--stride",     type=int,   default=1,  choices=[1, 2])
+    parser.add_argument("--warm_up",    type=int,   default=3)
     parser.add_argument("--time_shift", action="store_true")
     # generic
     for k, v in GENERIC_HOST_ARGS.items():  parser.add_argument(f"--{k}", type=v, default=None)
@@ -84,21 +82,20 @@ def check_progress():
 def initialize():
     with torch.no_grad():
         with torch.amp.autocast("cuda", enabled=False):
-            global pipe, local_rank, async_diff, initialized, logger #, can_cache, cache_kwargs
+            global pipe, local_rank, async_diff, initialized, logger
             args = get_args()
 
             # checks
             assert not (args.type == "ad" and args.motion_adapter is None and args.motion_module is None), "AnimateDiff requires providing a motion adapter/module."
-            # assert (args.ip_adapter is None or args.quantize_to is None), "IPAdapter is not supported when using quantization"
-            # if args.type in ["ad", "sd3", "sdup"]: can_cache = False
 
             # init distributed inference
             mp.set_start_method("spawn", force=True)
             local_rank = int(os.environ.get("LOCAL_RANK", 0))
             torch.cuda.set_device(local_rank)
             logger = get_logger(local_rank)
+
             # dynamo tweaks
-            setup_torch_dynamo()
+            setup_torch_dynamo(args.torch_cache_limit, args.torch_accumlated_cache_limit, args.torch_capture_scalar)
             # torch tweaks
             setup_torch_backends()
 
@@ -196,17 +193,12 @@ def initialize():
 
             # quantize
             if args.quantize_unet_to is not None:
-                if args.type in ["sd3"]:
-                    quantize_helper("transformer", pipe, args.quantize_unet_to, logger)
-                else:
-                    quantize_helper("unet", pipe, args.quantize_unet_to, logger)
-            if args.quantize_encoder_to is not None:
-                quantize_helper("encoder", pipe, args.quantize_encoder_to, logger)
+                if args.type in ["sd3"]:                                                quantize_helper("transformer", pipe, args.quantize_unet_to, logger)
+                else:                                                                   quantize_helper("unet", pipe, args.quantize_unet_to, logger)
+            if args.quantize_encoder_to is not None:                                    quantize_helper("encoder", pipe, args.quantize_encoder_to, logger)
             if args.quantize_misc_to is not None:
-                if hasattr(pipe, "controlnet") and pipe.controlnet is not None:
-                    quantize_helper("manual", pipe, args.quantize_misc_to, logger, manual_module="controlnet")
-                if hasattr(pipe, "motion_adapter") and pipe.motion_adapter is not None:
-                    quantize_helper("manual", pipe, args.quantize_misc_to, logger, manual_module="motion_adapter")
+                if hasattr(pipe, "controlnet") and pipe.controlnet is not None:         quantize_helper("manual", pipe, args.quantize_misc_to, logger, manual_module="controlnet")
+                if hasattr(pipe, "motion_adapter") and pipe.motion_adapter is not None: quantize_helper("manual", pipe, args.quantize_misc_to, logger, manual_module="motion_adapter")
 
             # set lora
             adapter_names = None
@@ -218,12 +210,13 @@ def initialize():
                 if args.compile_mode is not None and args.compile_options is not None:
                     logger.info("Compile mode and options are both defined, will ignore compile mode.")
                     args.compile_mode = None
-                compiler_config = {}
+                compiler_config                         = {}
+                compiler_config["fullgraph"]            = (args.compile_fullgraph_off is None or args.compile_fullgraph_off == False)
+                compiler_config["dynamic"]              = False
                 if args.compile_backend is not None:    compiler_config["backend"] = args.compile_backend
                 if args.compile_mode is not None:       compiler_config["mode"] = args.compile_mode
                 if args.compile_options is not None:    compiler_config["options"] = json.loads(args.compile_options)
-                compiler_config["fullgraph"] = (args.compile_fullgraph_off is None or args.compile_fullgraph_off == False)
-                compiler_config["dynamic"] = False
+
                 if args.compile_unet:
                     if args.type in ["sd3"]:            compile_helper("transformer", pipe, compiler_config, logger, adapter_names=adapter_names)
                     else:                               compile_helper("unet", pipe, compiler_config, logger, adapter_names=adapter_names)
@@ -246,15 +239,15 @@ def initialize():
                 generator = torch.Generator(device="cpu").manual_seed(1)
                 async_diff.reset_state(warm_up=args.warm_up)
 
-                prompt = "a dog"
-                cfg = 7
-                frames = 25
-                chunk_size = 8
+                prompt      = "a dog"
+                cfg         = 7
+                frames      = 25
+                chunk_size  = 8
 
-                kwargs = {}
-                kwargs["width"] = args.width
-                kwargs["height"] = args.height
-                kwargs["num_inference_steps"] = args.warm_up_steps
+                kwargs                          = {}
+                kwargs["width"]                 = args.width
+                kwargs["height"]                = args.height
+                kwargs["num_inference_steps"]   = args.warm_up_steps
                 match args.type:
                     case "ad":
                         if args.ip_adapter is not None:
@@ -278,17 +271,11 @@ def initialize():
                             for k, v in args.control_net.items():
                                 kwargs["image"] = get_warmup_image()
                                 kwargs["controlnet_conditioning_scale"] = v
+
                 logger.info("Starting warmup run")
-                #if can_cache:
-                #    helper = DeepCacheSDHelper(pipe=pipe)
-                #    helper.set_params(**cache_kwargs)
-                #    helper.enable()
                 pipe.vae = pipe.vae.to(torch_dtype)
                 pipe(**kwargs)
                 pipe.vae = pipe.vae.to(torch.float32)
-                #if can_cache:
-                #    helper.disable()
-                #    del helper
 
             # clean up
             clean()
@@ -326,7 +313,7 @@ def generate_image_parallel(
 
     with torch.no_grad():
         with torch.amp.autocast("cuda", enabled=False):
-            global async_diff, pipe, step_progress, can_cache, cache_kwargs
+            global async_diff, pipe, step_progress
             args = get_args()
             device = torch.device("cuda", torch.cuda.current_device())
             torch_dtype = get_torch_type(args.variant)
@@ -335,8 +322,17 @@ def generate_image_parallel(
             step_progress = 0
             set_scheduler(args, pipe)
 
+            # checks
+            if args.type in ["sdup", "svd"] and image is None:
+                return "No image provided for an image pipeline.", None, False
+            if sigmas is not None and timesteps is not None:
+                return "Either sigmas or timesteps can be defined, but not both.", None, False
+            if args.ip_adapter is not None and ip_image is None:
+                return "No IPAdapter image provided for a IPAdapter-loaded pipeline", None, False
+            if args.control_net is not None and control_image is None:
+                return "No ConstrolNet image provided for a ControlNet-loaded pipeline", None, False
+
             if args.type in ["sdup", "svd"]:
-                if image is None: return "No image provided for an image pipeline.", None, False
                 image = load_image(image)
             if ip_image is not None and args.ip_adapter is not None:
                 ip_image = load_image(ip_image)
@@ -347,10 +343,7 @@ def generate_image_parallel(
                 global get_torch_type, logger, process_input_latent, step_progress
                 nonlocal args, denoise, device, latent, steps, torch_dtype
                 scheduler_name = get_scheduler_name(pipe.scheduler)
-                if scheduler_name in ["heun"]:
-                    the_index = int(index / 2)
-                else:
-                    the_index = index
+                the_index = get_scheduler_progressbar_offset_index(pipe.scheduler, index)
                 step_progress = the_index / steps * 100
                 if latent is not None:
                     if denoise is None or denoise > 1.0:
@@ -358,8 +351,8 @@ def generate_image_parallel(
                     target = int(steps * (1 - denoise))
                     if the_index == target:
                         latent = process_input_latent(latent, pipe, torch_dtype, device, timestep=timestep)
-                        callback_kwargs["latents"] = latent
-                        logger.info(f'Injected latent at step {target}')
+                        callback_kwargs["latents"] = latent.to(device=pipe.unet.device, dtype=pipe.unet.dtype)
+                        logger.info(f'Injected latent at step {target}/{steps}')
                 return callback_kwargs
 
             generator = torch.Generator(device="cpu").manual_seed(seed)
@@ -367,10 +360,8 @@ def generate_image_parallel(
             positive_pooled_embeds = None
             negative_pooled_embeds = None
             if args.compel and args.type in ["sd1", "sd2", "sdxl"] and positive_embeds is None and negative_embeds is None:
-                if args.type in ["sd1", "sd2"]:
-                    embeddings_type = ReturnedEmbeddingsType.PENULTIMATE_HIDDEN_STATES_NORMALIZED
-                else:
-                    embeddings_type = ReturnedEmbeddingsType.PENULTIMATE_HIDDEN_STATES_NON_NORMALIZED
+                if args.type in ["sd1", "sd2"]: embeddings_type = ReturnedEmbeddingsType.PENULTIMATE_HIDDEN_STATES_NORMALIZED
+                else:                           embeddings_type = ReturnedEmbeddingsType.PENULTIMATE_HIDDEN_STATES_NON_NORMALIZED
                 compel = Compel(
                     tokenizer=[pipe.tokenizer, pipe.tokenizer_2],
                     text_encoder=[pipe.text_encoder, pipe.text_encoder_2],
@@ -379,15 +370,14 @@ def generate_image_parallel(
                     truncate_long_prompts=False,
                 )
                 positive_embeds, positive_pooled_embeds = compel([positive])
-                if negative is not None and len(negative) > 0:
-                    negative_embeds, negative_pooled_embeds = compel([negative])
-                positive = None
-                negative = None
+                if negative is not None and len(negative) > 0: negative_embeds, negative_pooled_embeds = compel([negative])
+                positive = negative = None
 
-            kwargs = {}
-            kwargs["generator"] = generator
-            kwargs["num_inference_steps"] = steps
-            kwargs["callback_on_step_end"] = set_step_progress
+            kwargs                                          = {}
+            kwargs["generator"]                             = generator
+            kwargs["num_inference_steps"]                   = steps
+            kwargs["callback_on_step_end"]                  = set_step_progress
+            kwargs["callback_on_step_end_tensor_inputs"]    = ["latents"]
             match args.type:
                 case "ad":
                     is_image = False
@@ -438,32 +428,19 @@ def generate_image_parallel(
                     if sigmas is not None:                  kwargs["sigmas"]                    = sigmas
                     if timesteps is not None:               kwargs["timesteps"]                 = timesteps
                     if denoising_end is not None:           kwargs["denoising_end"]             = denoising_end
-                    if args.ip_adapter is not None:
-                        if ip_image is not None:
-                            kwargs["ip_adapter_image"] = ip_image
-                        else:
-                            return "No IPAdapter image provided for a IPAdapter-loaded pipeline", None, False
-                    if args.control_net is not None:
-                        if control_image is not None:
-                            for k, v in json.loads(args.control_net).items():
-                                kwargs["image"] = control_image
-                                kwargs["controlnet_conditioning_scale"] = v
-                        else:
-                            return "No ConstrolNet image provided for a ControlNet-loaded pipeline", None, False
+                    if args.ip_adapter is not None and ip_image is not None:
+                        kwargs["ip_adapter_image"] = ip_image
+                    if args.control_net is not None and control_image is not None:
+                        for k, v in json.loads(args.control_net).items():
+                            kwargs["image"] = control_image
+                            kwargs["controlnet_conditioning_scale"] = v
                     kwargs["width"] = args.width
                     kwargs["height"] = args.height
                     kwargs["clip_skip"] = clip_skip
                     kwargs["guidance_scale"] = cfg
                     kwargs["output_type"] = "latent"
 
-            #if can_cache:
-            #    helper = DeepCacheSDHelper(pipe=pipe)
-            #    helper.set_params(**cache_kwargs)
-            #    helper.enable()
             output = pipe(**kwargs)
-            #if can_cache:
-            #    helper.disable()
-            #    del helper
 
             if args.compel:
                 # https://github.com/damian0815/compel/issues/24
