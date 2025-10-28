@@ -6,10 +6,6 @@ import numpy
 import os
 import safetensors
 import torch
-import torch._dynamo
-import torch.nn.functional as F
-import torchvision.transforms.functional as F2
-from diffusers import EulerAncestralDiscreteScheduler
 from diffusers.loaders.lora_conversion_utils import _convert_non_diffusers_lora_to_diffusers
 from diffusers.utils import load_image
 from diffusers.utils.torch_utils import randn_tensor
@@ -21,8 +17,8 @@ from modules.scheduler_config import get_scheduler, get_scheduler_name,  get_sch
 
 
 GENERIC_HOST_ARGS = {
-    "height":                       int,
-    "width":                        int,
+    "height":                       int,    # meant for distrifuser, other hosts can use request
+    "width":                        int,    # meant for distrifuser, other hosts can use request
     "warm_up_steps":                int,
     "port":                         int,
     "type":                         str,
@@ -70,19 +66,15 @@ def clean():
 
 
 def setup_torch_dynamo(cache_size_limit, accumulated_cache_size_limit, capture_scalar_outputs):
-    if cache_size_limit == None:                cache_size_limit = 8
-    if accumulated_cache_size_limit == None:    accumulated_cache_size_limit = 64
-    if capture_scalar_outputs == None:          capture_scalar_outputs = False
-    # TODO: config.json
-    #torch._dynamo.config.suppress_errors = True
-    torch._dynamo.config.cache_size_limit = cache_size_limit
-    torch._dynamo.config.accumulated_cache_size_limit = accumulated_cache_size_limit
-    torch._dynamo.config.capture_scalar_outputs = capture_scalar_outputs
+    if cache_size_limit is not None:                torch._dynamo.config.cache_size_limit               = cache_size_limit
+    if accumulated_cache_size_limit is not None:    torch._dynamo.config.accumulated_cache_size_limit   = accumulated_cache_size_limit
+    if capture_scalar_outputs is not None:          torch._dynamo.config.capture_scalar_outputs         = capture_scalar_outputs
+    #torch._dynamo.config.suppress_errors           = True
     return
 
 
 def setup_torch_backends():
-    # TODO: config.json
+    # TODO: config
     # TODO: this breaks flux
     #torch.backends.cuda.enable_mem_efficient_sdp(False)
     #torch.backends.cuda.enable_flash_sdp(False)
@@ -268,7 +260,32 @@ def compile_model(pipe, logger):
     return
 
 
-def print_params(params, logger):
+def print_params(data, logger):
+    params = {
+        "height":               data.get("height"),
+        "width":                data.get("width"),
+        "positive":             data.get("positive"),
+        "negative":             data.get("negative"),
+        "positive_embeds":      (data.get("positive_embeds") is not None),
+        "negative_embeds":      (data.get("negative_embeds") is not None),
+        "image":                (data.get("image") is not None),
+        "ip_image":             (data.get("ip_image") is not None),
+        "control_image":        (data.get("control_image") is not None),
+        "latent":               (data.get("latent") is not None),
+        "steps":                data.get("steps"),
+        "cfg":                  data.get("cfg"),
+        "controlnet_scale":     data.get("controlnet_scale"),
+        "seed":                 data.get("seed"),
+        "frames":               data.get("frames"),
+        "decode_chunk_size":    data.get("decode_chunk_size"),
+        "clip_skip":            data.get("clip_skip"),
+        "motion_bucket_id":     data.get("motion_bucket_id"),
+        "noise_aug_strength":   data.get("noise_aug_strength"),
+        "sigmas":               (data.get("sigmas") is not None),
+        "timesteps":            (data.get("timesteps") is not None),
+        "denoising_start":      data.get("denoising_start"),
+        "denoising_end":        data.get("denoising_end"),
+    }
     formatted = "Received parameters:"
     for k, v in params.items():
         formatted += f'\n{k}:{str(v)}'

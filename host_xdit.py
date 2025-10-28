@@ -136,33 +136,26 @@ def initialize():
             # init distributed inference
             # remove all our args before passing it to xdit
             xargs = copy.copy(args)
-            del xargs.checkpoint
-            del xargs.gguf_model
-            del xargs.scheduler
-            del xargs.warm_up_steps
-            del xargs.port
-            del xargs.variant
-            del xargs.type
-            del xargs.lora
-            del xargs.compile_unet
-            del xargs.compile_vae
-            del xargs.compile_encoder
-            del xargs.compile_backend
-            del xargs.compile_mode
-            del xargs.compile_options
-            del xargs.compile_fullgraph_off
-            del xargs.quantize_unet_to
-            del xargs.quantize_text_encoder_to
-            del xargs.quantize_misc_to
-            del xargs.vae
-            del xargs.control_net
-            del xargs.ip_adapter
-            del xargs.motion_adapter_lora
-            del xargs.motion_adapter
-            del xargs.motion_module
-            del xargs.torch_cache_limit
-            del xargs.torch_accumlated_cache_limit
-            del xargs.torch_capture_scalar
+            supported = [
+                "height",
+                "width",
+                "xformers_efficient",
+                "enable_model_cpu_offload",
+                "enable_sequential_cpu_offload",
+            ]
+
+            remap = {
+                "enable_vae_tiling": "enable_tiling",
+                "enable_vae_slicing": "enable_slicing",
+            }
+
+            for k,v in GENERIC_HOST_ARGS.items():
+                if k in xargs:
+                    if k in remap.keys():
+                        setattr(xargs, remap[k], v)
+                        delattr(xargs, k)
+                    elif k not in supported:
+                        delattr(xargs, k)
             engine_args = xFuserArgs.from_cli_args(xargs)
             engine_config, input_config = engine_args.create_config()
             engine_config.runtime_config.dtype = torch_dtype
@@ -315,6 +308,8 @@ def initialize():
 
 def generate_image_parallel(
     dummy,
+    height,
+    width,
     positive,
     negative,
     positive_embeds,
@@ -383,6 +378,8 @@ def generate_image_parallel(
             kwargs["max_sequence_length"]                   = 256
             kwargs["output_type"]                           = "latent"
             kwargs["use_resolution_binning"]                = input_config.use_resolution_binning
+            if height is not None:                          kwargs["height"]                    = height
+            if width is not None:                           kwargs["width"]                     = width
             if positive is not None:                        kwargs["prompt"]                    = positive
             if negative is not None:                        kwargs["negative_prompt"]           = negative
             if positive_embeds is not None:                 kwargs["prompt_embeds"]             = positive_embeds
@@ -452,7 +449,13 @@ def generate_image():
     sigmas              = data.get("sigmas")
     timesteps           = data.get("timesteps")
     denoising_end       = data.get("denoising_end")
+    height              = data.get("height")
+    width               = data.get("width")
 
+    print_params(data, logger)
+
+    if height is None:                                          height = args.height
+    if width is None:                                           width = args.width
     if positive is not None and len(positive) == 0:             positive = None
     if negative is not None and len(negative) == 0:             negative = None
     if positive is None and positive_embeds is None:            jsonify({ "message": "No input provided", "output": None, "is_image": False })
@@ -467,6 +470,8 @@ def generate_image():
 
     params = [
         dummy,
+        height,
+        width,
         positive,
         negative,
         positive_embeds,
@@ -483,23 +488,6 @@ def generate_image():
         denoising_end,
     ]
     dist.broadcast_object_list(params, src=0)
-    print_params(
-        {
-            "positive": positive,
-            "negative": negative,
-            "positive_embeds": (positive_embeds is not None),
-            "negative_embeds": (negative_embeds is not None),
-            "ip_image": (ip_image is not None),
-            "latent": (latent is not None),
-            "steps": steps,
-            "seed": seed,
-            "cfg": cfg,
-            "clip_skip": clip_skip,
-            "denoise": denoise,
-            "sigmas": sigmas,
-            "timesteps": timesteps,
-            "denoising_end": denoising_end,
-        }, logger)
     message, outputs, is_image = generate_image_parallel(*params)
     response = { "message": message, "output": outputs["image"], "latent": outputs["latent"], "is_image": is_image }
     return jsonify(response)
@@ -513,7 +501,7 @@ def run_host():
         app.run(host="localhost", port=args.port)
     else:
         while True:
-            params = [None] * 15 # len(params) of generate_image_parallel()
+            params = [None] * 17 # len(params) of generate_image_parallel()
             logger.info(f"waiting for tasks")
             dist.broadcast_object_list(params, src=0)
             if params[0] is None:

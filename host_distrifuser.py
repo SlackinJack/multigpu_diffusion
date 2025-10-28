@@ -222,9 +222,9 @@ def generate_image_parallel(
     seed,
     cfg,
     clip_skip,
-    denoise,
     sigmas,
     timesteps,
+    denoising_start,
     denoising_end,
 ):
     with torch.no_grad():
@@ -250,10 +250,8 @@ def generate_image_parallel(
                 negative_embeds = negative_embeds[0][0]
 
             if args.compel and positive_embeds is None and negative_embeds is None:
-                if args.type in ["sd1", "sd2"]:
-                    embeddings_type = ReturnedEmbeddingsType.PENULTIMATE_HIDDEN_STATES_NORMALIZED
-                else:
-                    embeddings_type = ReturnedEmbeddingsType.PENULTIMATE_HIDDEN_STATES_NON_NORMALIZED
+                if args.type in ["sd1", "sd2"]: embeddings_type = ReturnedEmbeddingsType.PENULTIMATE_HIDDEN_STATES_NORMALIZED
+                else:                           embeddings_type = ReturnedEmbeddingsType.PENULTIMATE_HIDDEN_STATES_NON_NORMALIZED
                 compel = Compel(
                     tokenizer=[pipe.pipeline.tokenizer, pipe.pipeline.tokenizer_2],
                     text_encoder=[pipe.pipeline.text_encoder, pipe.pipeline.text_encoder_2],
@@ -267,14 +265,14 @@ def generate_image_parallel(
 
             def set_step_progress(pipe, index, timestep, callback_kwargs):
                 global get_torch_type, logger, process_input_latent, step_progress
-                nonlocal args, denoise, device, latent, steps, torch_dtype
+                nonlocal args, denoising_start, device, latent, steps, torch_dtype
                 scheduler_name = get_scheduler_name(pipe.scheduler)
                 the_index = get_scheduler_progressbar_offset_index(pipe.scheduler, index)
                 step_progress = the_index / steps * 100
                 if latent is not None:
-                    if denoise is None or denoise > 1.0:
-                        denoise = 1.0
-                    target = int(steps * (1 - denoise))
+                    if denoising_start is None or denoising_start > 1.0:
+                        denoising_start = 1.0
+                    target = int(steps * (1 - denoising_start))
                     if index == target:
                         latent = process_input_latent(latent, pipe, torch_dtype, device, timestep=timestep, is_distrifuser=True)
                         callback_kwargs["latents"] = latent
@@ -356,10 +354,12 @@ def generate_image():
     seed                = data.get("seed")
     cfg                 = data.get("cfg")
     clip_skip           = data.get("clip_skip")
-    denoise             = data.get("denoise")
     sigmas              = data.get("sigmas")
     timesteps           = data.get("timesteps")
+    denoising_start     = data.get("denoising_start")
     denoising_end       = data.get("denoising_end")
+
+    print_params(data, logger)
 
     if positive is not None and len(positive) == 0:             positive = None
     if negative is not None and len(negative) == 0:             negative = None
@@ -385,29 +385,12 @@ def generate_image():
         seed,
         cfg,
         clip_skip,
-        denoise,
         sigmas,
         timesteps,
+        denoising_start,
         denoising_end,
     ]
     dist.broadcast_object_list(params, src=0)
-    print_params(
-        {
-            "positive": positive,
-            "negative": negative,
-            "positive_embeds": (positive_embeds is not None),
-            "negative_embeds": (negative_embeds is not None),
-            "ip_image": (ip_image is not None),
-            "latent": (latent is not None),
-            "steps": steps,
-            "seed": seed,
-            "cfg": cfg,
-            "clip_skip": clip_skip,
-            "denoise": denoise,
-            "sigmas": (sigmas is not None),
-            "timesteps": (timesteps is not None),
-            "denoising_end": denoising_end,
-        }, logger)
     message, outputs, is_image = generate_image_parallel(*params)
     response = { "message": message, "output": outputs.get("image"), "latent": outputs.get("latent"), "is_image": is_image }
     return jsonify(response)

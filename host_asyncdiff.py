@@ -288,6 +288,8 @@ def initialize():
 
 def generate_image_parallel(
     dummy,
+    height,
+    width,
     positive,
     negative,
     positive_embeds,
@@ -305,9 +307,9 @@ def generate_image_parallel(
     clip_skip,
     motion_bucket_id,
     noise_aug_strength,
-    denoise,
     sigmas,
     timesteps,
+    denoising_start,
     denoising_end,
 ):
 
@@ -332,6 +334,7 @@ def generate_image_parallel(
             if args.control_net is not None and control_image is None:
                 return "No ConstrolNet image provided for a ControlNet-loaded pipeline", None, False
 
+            # load image
             if args.type in ["sdup", "svd"]:
                 image = load_image(image)
             if ip_image is not None and args.ip_adapter is not None:
@@ -339,24 +342,27 @@ def generate_image_parallel(
             if control_image is not None and args.control_net is not None:
                 control_image = load_image(control_image)
 
+            # progress bar
             def set_step_progress(pipe, index, timestep, callback_kwargs):
                 global get_torch_type, logger, process_input_latent, step_progress
-                nonlocal args, denoise, device, latent, steps, torch_dtype
+                nonlocal args, denoising_start, device, latent, steps, torch_dtype
                 scheduler_name = get_scheduler_name(pipe.scheduler)
                 the_index = get_scheduler_progressbar_offset_index(pipe.scheduler, index)
                 step_progress = the_index / steps * 100
                 if latent is not None:
-                    if denoise is None or denoise > 1.0:
-                        denoise = 1.0
-                    target = int(steps * (1 - denoise))
+                    if denoising_start is None or denoising_start > 1.0:
+                        denoising_start = 1.0
+                    target = int(steps * (1 - denoising_start))
                     if the_index == target:
                         latent = process_input_latent(latent, pipe, torch_dtype, device, timestep=timestep)
                         callback_kwargs["latents"] = latent.to(device=pipe.unet.device, dtype=pipe.unet.dtype)
                         logger.info(f'Injected latent at step {target}/{steps}')
                 return callback_kwargs
 
+            # set seed
             generator = torch.Generator(device="cpu").manual_seed(seed)
 
+            # compel
             positive_pooled_embeds = None
             negative_pooled_embeds = None
             if args.compel and args.type in ["sd1", "sd2", "sdxl"] and positive_embeds is None and negative_embeds is None:
@@ -373,6 +379,7 @@ def generate_image_parallel(
                 if negative is not None and len(negative) > 0: negative_embeds, negative_pooled_embeds = compel([negative])
                 positive = negative = None
 
+            # set pipe
             kwargs                                          = {}
             kwargs["generator"]                             = generator
             kwargs["num_inference_steps"]                   = steps
@@ -387,11 +394,11 @@ def generate_image_parallel(
                         kwargs["conditioning_frames"] = [control_image] * frames
                     if positive is not None:    kwargs["prompt"] = positive
                     if negative is not None:    kwargs["negative_prompt"] = negative
-                    kwargs["width"] = args.width
-                    kwargs["height"] = args.height
                     kwargs["num_frames"] = frames
                     kwargs["guidance_scale"] = cfg
                     kwargs["output_type"] = "pil"
+                    if height is not None: kwargs["height"] = height
+                    if width is not None: kwargs["width"] = width
                 case "sdup":
                     is_image = True
                     if positive is not None:    kwargs["prompt"] = positive
@@ -402,13 +409,13 @@ def generate_image_parallel(
                 case "svd":
                     is_image = False
                     if image is not None: kwargs["image"] = image
-                    kwargs["width"] = args.width
-                    kwargs["height"] = args.height
                     kwargs["num_frames"] = frames
                     kwargs["decode_chunk_size"] = decode_chunk_size
                     kwargs["motion_bucket_id"] = motion_bucket_id
                     kwargs["noise_aug_strength"] = noise_aug_strength
                     kwargs["output_type"] = "pil"
+                    if height is not None: kwargs["height"] = height
+                    if width is not None: kwargs["width"] = width
                 case _:
                     is_image = True
                     if not args.compel:
@@ -419,6 +426,8 @@ def generate_image_parallel(
                             negative_pooled_embeds = negative_embeds[0][1]["pooled_output"]
                             negative_embeds = negative_embeds[0][0]
 
+                    if height is not None:                  kwargs["height"]                    = height
+                    if width is not None:                   kwargs["width"]                     = width
                     if positive is not None:                kwargs["prompt"]                    = positive
                     if negative is not None:                kwargs["negative_prompt"]           = negative
                     if positive_embeds is not None:         kwargs["prompt_embeds"]             = positive_embeds
@@ -428,18 +437,18 @@ def generate_image_parallel(
                     if sigmas is not None:                  kwargs["sigmas"]                    = sigmas
                     if timesteps is not None:               kwargs["timesteps"]                 = timesteps
                     if denoising_end is not None:           kwargs["denoising_end"]             = denoising_end
+
                     if args.ip_adapter is not None and ip_image is not None:
                         kwargs["ip_adapter_image"] = ip_image
                     if args.control_net is not None and control_image is not None:
                         for k, v in json.loads(args.control_net).items():
                             kwargs["image"] = control_image
                             kwargs["controlnet_conditioning_scale"] = v
-                    kwargs["width"] = args.width
-                    kwargs["height"] = args.height
                     kwargs["clip_skip"] = clip_skip
                     kwargs["guidance_scale"] = cfg
                     kwargs["output_type"] = "latent"
 
+            # inference
             output = pipe(**kwargs)
 
             if args.compel:
@@ -449,6 +458,7 @@ def generate_image_parallel(
             # clean up
             clean()
 
+            # output
             if dist.get_rank() == 0:
                 step_progress = 100
                 if output is not None:
@@ -472,6 +482,8 @@ def generate_image():
     args = get_args()
     data = request.json
     dummy               = 0
+    height              = data.get("height")
+    width               = data.get("width")
     positive            = data.get("positive")
     negative            = data.get("negative")
     positive_embeds     = data.get("positive_embeds")
@@ -489,11 +501,15 @@ def generate_image():
     clip_skip           = data.get("clip_skip")
     motion_bucket_id    = data.get("motion_bucket_id")
     noise_aug_strength  = data.get("noise_aug_strength")
-    denoise             = data.get("denoise")
     sigmas              = data.get("sigmas")
     timesteps           = data.get("timesteps")
+    denoising_start     = data.get("denoising_start")
     denoising_end       = data.get("denoising_end")
 
+    print_params(data, logger)
+
+    if height is None:                                                  height = args.height
+    if width is None:                                                   width = args.width
     if positive is not None and len(positive) == 0:                     positive = None
     if negative is not None and len(negative) == 0:                     negative = None
     if image is None and positive is None and positive_embeds is None:  jsonify({ "message": "No input provided", "output": None, "is_image": False })
@@ -510,6 +526,8 @@ def generate_image():
 
     params = [
         dummy,
+        height,
+        width,
         positive,
         negative,
         positive_embeds,
@@ -527,36 +545,13 @@ def generate_image():
         clip_skip,
         motion_bucket_id,
         noise_aug_strength,
-        denoise,
         sigmas,
         timesteps,
+        denoising_start,
         denoising_end,
     ]
+
     dist.broadcast_object_list(params, src=0)
-    print_params(
-        {
-            "positive": positive,
-            "negative": negative,
-            "positive_embeds": (positive_embeds is not None),
-            "negative_embeds": (negative_embeds is not None),
-            "image": (image is not None),
-            "ip_image": (ip_image is not None),
-            "control_image": (control_image is not None),
-            "latent": (latent is not None),
-            "steps": steps,
-            "cfg": cfg,
-            "controlnet_scale": controlnet_scale,
-            "seed": seed,
-            "frames": frames,
-            "decode_chunk_size": decode_chunk_size,
-            "clip_skip": clip_skip,
-            "motion_bucket_id": motion_bucket_id,
-            "noise_aug_strength": noise_aug_strength,
-            "denoise": denoise,
-            "sigmas": (sigmas is not None),
-            "timesteps": (timesteps is not None),
-            "denoising_end": denoising_end,
-        }, logger)
     message, outputs, is_image = generate_image_parallel(*params)
     if is_image and args.type not in ["ad", "sdup", "svd"]:
         response = { "message": message, "output": outputs.get("image"), "latent": outputs.get("latent"), "is_image": is_image }
@@ -573,7 +568,7 @@ def run_host():
         app.run(host="localhost", port=args.port)
     else:
         while True:
-            params = [None] * 22 # len(params) of generate_image_parallel()
+            params = [None] * 24 # len(params) of generate_image_parallel()
             logger.info(f"waiting for tasks")
             dist.broadcast_object_list(params, src=0)
             if params[0] is None:
