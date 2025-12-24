@@ -76,7 +76,7 @@ def get_scheduler_name(scheduler):
 
         case "IPNDMScheduler":                  return "ipndm"
 
-        case _:                                 raise NotImplementedError
+        case _:                                 return None
 
 
 def get_scheduler_supports_setting_timesteps_or_sigmas(scheduler):
@@ -96,7 +96,7 @@ def get_scheduler_supports_setting_sigmas(scheduler):
 def get_scheduler_progressbar_offset_index(scheduler, index):
     schedulers = { "heun": 0.5 }
     s = get_scheduler_name(scheduler)
-    if s in schedulers.keys(): return index * schedulers[s]
+    if s is not None and s in schedulers.keys(): return index * schedulers[s]
     return index
 
 

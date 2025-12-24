@@ -10,22 +10,10 @@ echo "########## Clone AsyncDiff ##########"
 echo ""
 bash scripts/clone_asyncdiff_repo.sh
 
-echo ""
-echo "########## Patching AsyncDiff ##########"
-echo ""
-python3 scripts/PatchAsyncDiff.py
-
-
-
-echo ""
-echo "########## Clone DistriFuser ##########"
-echo ""
-bash scripts/clone_distrifuser_repo.sh
-
-echo ""
-echo "########## Patching DistriFuser ##########"
-echo ""
-python3 scripts/PatchDistriFuser.py
+#echo ""
+#echo "########## Patching AsyncDiff ##########"
+#echo ""
+#python3 scripts/PatchAsyncDiff.py
 
 
 

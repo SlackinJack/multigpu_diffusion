@@ -7,25 +7,13 @@ import torch
 import torch.distributed as dist
 import torchvision.transforms as transforms
 from diffusers import (
-    AutoencoderKL,
-    FluxTransformer2DModel,
     GGUFQuantizationConfig,
     HunyuanDiT2DModel,
     QuantoConfig,
-    SD3Transformer2DModel,
-    Transformer2DModel,
-    UNet2DConditionModel,
 )
 from diffusers.utils import load_image
 from flask import Flask, request, jsonify
 from PIL import Image
-from transformers import (
-    BertModel,
-    CLIPTextModel,
-    CLIPTextModelWithProjection,
-    LlamaModel,
-    T5EncoderModel,
-)
 
 
 from xDiT.xfuser import (
@@ -200,26 +188,22 @@ def initialize():
             match args.type:
                 case "flux":
                     if args.gguf_model is not None:
-                        kwargs["transformer"] = FluxTransformer2DModel.from_single_file(args.gguf_model, config=args.checkpoint, subfolder="transformer", **kwargs_gguf)
-                    kwargs["vae"] = AutoencoderKL.from_pretrained(args.checkpoint, subfolder="vae", **kwargs_vae)
+                        kwargs["transformer"] = load_model(args.gguf_model, "FluxTransformer2DModel", torch_dtype)
+                        # kwargs["transformer"] = FluxTransformer2DModel.from_single_file(args.gguf_model, config=args.checkpoint, subfolder="transformer", **kwargs_gguf)
                     PipelineClass = xFuserFluxPipeline
                 case "hy":
-                    kwargs["vae"] = AutoencoderKL.from_pretrained(args.checkpoint, subfolder="vae", **kwargs_vae)
                     PipelineClass = xFuserHunyuanDiTPipeline
                 case "pixa":
-                    kwargs["vae"] = AutoencoderKL.from_pretrained(args.checkpoint, subfolder="vae", **kwargs_vae)
                     PipelineClass = xFuserPixArtAlphaPipeline
                 case "pixs":
-                    kwargs["vae"] = AutoencoderKL.from_pretrained(args.checkpoint, subfolder="vae", **kwargs_vae)
                     PipelineClass = xFuserPixArtSigmaPipeline
                 case "sd3":
-                    kwargs["vae"] = AutoencoderKL.from_pretrained(args.checkpoint, subfolder="vae", **kwargs_vae)
                     PipelineClass = xFuserStableDiffusion3Pipeline
                 case _: raise NotImplementedError
 
             # set vae
             if args.vae is not None:
-                kwargs["vae"] = AutoencoderKL.from_pretrained(args.vae, **kwargs_vae)
+                kwargs["vae"] = load_model(args.vae, "AutoencoderKL", torch_dtype)
 
             # init pipe
             pipe = PipelineClass.from_pretrained(args.checkpoint, **kwargs)

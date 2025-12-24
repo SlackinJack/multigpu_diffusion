@@ -17,14 +17,6 @@ Python Flask hosts for distributed parallel Diffusion inferencing solutions.
 | Stable Video Diffusion    | svd       | ❌    | ❌          | ❌         | ✅❓           | ✅❓      | ❌              |
 
 
-### DistriFuser:
-| Model                | Type Name | LoRA   | ControlNet | IPAdapter | Quantization | Compile | CPU Offloading |
-|----------------------|-----------|--------|------------|-----------|--------------|---------|----------------|
-| Stable Diffusion 1.5 | sd1       | ✅❓     | ❌          | ✅❓        | ✅❓           | ✅❓      | ❌              |
-| Stable Diffusion 2   | sd2       | ✅❓     | ❌          | ✅❓        | ✅❓           | ✅❓      | ❌              |
-| Stable Diffusion XL  | sdxl      | ✅❓     | ❌          | ✅❓        | ✅❓           | ✅❓      | ❌              |
-
-
 ### xDiT:
 | Model              | Type Name | LoRA   | ControlNet | IPAdapter | Quantization | Compile | CPU Offloading |
 |--------------------|-----------|--------|------------|-----------|--------------|---------|----------------|
@@ -76,5 +68,4 @@ Check out [multigpu_diffusion_comfyui](https://github.com/SlackinJack/multigpu_d
 
 ## Currently Implemented Software:
 - [AsyncDiff](https://github.com/czg1225/AsyncDiff)
-- [DistriFuser](https://github.com/mit-han-lab/distrifuser)
 - [xDiT](https://github.com/xdit-project/xDiT)
