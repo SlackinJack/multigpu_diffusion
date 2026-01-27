@@ -1,7 +1,7 @@
 echo ""
 echo "########## Clean Up Workspace ##########"
 echo ""
-rm -r AsyncDiff DistriFuser Wan2_1 xDiT
+rm -r AsyncDiff xDiT
 
 
 
@@ -9,33 +9,11 @@ echo ""
 echo "########## Clone AsyncDiff ##########"
 echo ""
 bash scripts/clone_asyncdiff_repo.sh
-
-#echo ""
-#echo "########## Patching AsyncDiff ##########"
-#echo ""
-#python3 scripts/PatchAsyncDiff.py
-
-
-
-#echo ""
-#echo "########## Clone Wan2.1 ##########"
-#echo ""
-#bash scripts/clone_wan_repo.sh
-
-#echo ""
-#echo "########## Patching WAN2.1 ##########"
-#echo ""
-#python3 scripts/PatchWan.py
+pip install -r AsyncDiff/requirements.txt
 
 
 
 echo ""
-echo "########## Clone xDiT ##########"
+echo "########## Installing Requirements ##########"
 echo ""
-bash scripts/clone_xdit_repo.sh
-
-echo ""
-echo "########## Patching xDiT ##########"
-echo ""
-python3 scripts/PatchxDiT.py
-
+pip install -r requirements.txt

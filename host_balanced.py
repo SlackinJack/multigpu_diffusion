@@ -5,10 +5,7 @@ import json
 import os
 import sys
 import torch
-import torch.distributed as dist
-import torch.multiprocessing as mp
 import traceback
-from datetime import timedelta
 from diffusers import (
     AnimateDiffControlNetPipeline,
     AnimateDiffPipeline,
@@ -27,22 +24,9 @@ from diffusers import (
     ZImagePipeline,
     # ZImageControlNetPipeline,
 )
-# from diffusers.hooks.group_offloading import apply_group_offloading
 from diffusers.utils import load_image
 from flask import Flask, request, jsonify
 from PIL import Image
-
-
-from compel import Compel, ReturnedEmbeddingsType
-COMPEL_SUPPORTED_MODELS = ["sd1", "sd2", "sdxl"]
-
-
-from AsyncDiff.asyncdiff.async_animate import AsyncDiff as AsyncDiffAnimateDiff
-from AsyncDiff.asyncdiff.async_flux import AsyncDiff as AsyncDiffFlux
-from AsyncDiff.asyncdiff.async_sd import AsyncDiff as AsyncDiffStableDiffusion
-from AsyncDiff.asyncdiff.async_sd3 import AsyncDiff as AsyncDiffStableDiffusion3
-from AsyncDiff.asyncdiff.async_wan import AsyncDiff as AsyncDiffWan
-from AsyncDiff.asyncdiff.async_zimage import AsyncDiff as AsyncDiffZImage
 
 
 from modules.host_generics import *
@@ -51,14 +35,10 @@ from modules.utils import *
 
 
 app = Flask(__name__)
-async_diff = None
 
 
 def __initialize_distributed_environment():
-    mp.set_start_method("spawn", force=True)
-    torch.cuda.set_device(int(os.environ.get("LOCAL_RANK", 0)))
-    dist.init_process_group("nccl", timeout=timedelta(days=1))
-    set_local_rank(dist.get_rank())
+    set_local_rank(0)
     set_logger()
     set_initialized(True)
     return
@@ -67,32 +47,14 @@ def __initialize_distributed_environment():
 args = None
 def __run_host():
     global args
-
     parser = argparse.ArgumentParser()
-    # asyncdiff
-    parser.add_argument("--model_n",        type=int,   default=2) # NOTE: if n > 4, you'll need to manually map your model in pipe_config.py
-    parser.add_argument("--stride",         type=int,   default=1)
-    parser.add_argument("--synced_steps",   type=int,   default=3)
-    parser.add_argument("--synced_percent", type=float, default=None)
-    parser.add_argument("--time_shift",     action="store_true")
     # generic
     for k, v in GENERIC_HOST_ARGS.items():  parser.add_argument(f"--{k}", type=v, default=None)
     for e in GENERIC_HOST_ARGS_TOGGLES:     parser.add_argument(f"--{e}", action="store_true")
     args = parser.parse_args()
 
-    if get_local_rank() == 0:
-        log("Starting Flask host on rank 0", rank_0_only=True)
-        app.run(host="localhost", port=args.port)
-    else:
-        while True:
-            log(f"waiting for tasks")
-            params = [{"stop": True}]
-            dist.broadcast_object_list(params, src=0)
-            if params[0].get("stop") is not None:
-                log("Received exit signal, shutting down")
-                sys.exit()
-            log(f"Received task")
-            __handle_request_parallel(*params)
+    log("Starting Flask host")
+    app.run(host="localhost", port=args.port)
     return
 
 
@@ -107,105 +69,25 @@ def handle_path(path):
 
         # generation
         case "apply":
-            return __apply_pipeline(request.json)
+            return __apply_pipeline_parallel(request.json)
         case "generate":
-            return __generate_image(request.json)
+            return __generate_image_parallel(request.json)
         case "offload":
-            return __offload_modules()
+            return __offload_modules_parallel()
         case "close":
-            __close_pipeline()
+            sys.exit()
 
         case _:
             return "", 404
 
 
-asyncdiff_config = None
-def __reset_asyncdiff(steps):
-    global asyncdiff_config
-    if asyncdiff_config.get("synced_percent") is not None and asyncdiff_config.get("synced_percent") > 0:
-        __reset_asyncdiff_sync_state((steps * asyncdiff_config.get("synced_percent")) // 100)
-    else:
-        __reset_asyncdiff_sync_state(asyncdiff_config.get("synced_steps"))
-    return
-
-
-def __reset_asyncdiff_sync_state(synced_steps):
-    global async_diff
-    async_diff.reset_state(warm_up=synced_steps)
-    return
-
-
-def __handle_request_parallel(data):
-    if data.get("pipeline_type") is not None:
-        __apply_pipeline_parallel(data)
-    elif data.get("seed") is not None:
-        __generate_image_parallel(data)
-    elif data.get("offload") is not None:
-        __offload_modules_parallel()
-    else:
-        assert False, "Unknown data type"
-
-
-def __apply_pipeline(data):
-    dist.broadcast_object_list([data], src=0)
-    response = __apply_pipeline_parallel(data)
-    return response
-
-
-def __generate_image(data):
-    dist.broadcast_object_list([data], src=0)
-    response = __generate_image_parallel(data)
-    return jsonify(response)
-
-
-def __close_pipeline():
-    dist.broadcast_object_list([{"stop": True}], src=0)
-    sys.exit()
-
-
-def __offload_modules():
-    dist.broadcast_object_list([{"offload": True}], src=0)
-    return __offload_modules_parallel()
-
-
 def __offload_modules_parallel():
-    return __move_pipe("cpu")
-
-
-def __move_pipe(device):
-    global applied
-    if applied.get("enable_vae_slicing") is not None and applied.get("enable_vae_slicing") == True:
-        return '"enable_vae_slicing" is enabled - not offloading', 500
-    if applied.get("enable_vae_tiling") is not None and applied.get("enable_vae_tiling") == True:
-        return '"enable_vae_tiling" is enabled - not offloading', 500
-    if applied.get("enable_sequential_cpu_offload") is not None and applied.get("enable_sequential_cpu_offload") == True:
-        return '"enable_sequential_cpu_offload" is enabled - not offloading', 500
-    if applied.get("enable_model_cpu_offload") is not None and applied.get("enable_model_cpu_offload") == True:
-        return '"enable_model_cpu_offload" is enabled - not offloading', 500
-
-    moved = []
-    not_moved = []
-    set_pipe(get_pipe().to(device=device))
-    if "cuda" in device: torch.cuda.set_device(device)
-    for k, v in get_pipe().components.items():
-        if v is not None:
-            try:
-                module = getattr(get_pipe(), k)
-                setattr(get_pipe(), k, module.to(device=device))
-                if "cpu" in device: setattr(get_pipe(), k, module.cpu())
-                moved.append(k)
-            except:
-                not_moved.append(k)
-    clean()
-    dist.barrier()
-    msg = f"Moved to {device}: {str(moved)}, Not moved to {device}: {str(not_moved)}"
-    log(msg)
-    return msg, 200
+    return "Operation not supported", 500
 
 
 applied = None
 def __apply_pipeline_parallel(data):
-    global applied, async_diff, asyncdiff_config
+    global applied
 
     try:
         # models
@@ -241,11 +123,6 @@ def __apply_pipeline_parallel(data):
         enable_sequential_cpu_offload   = data.get("enable_sequential_cpu_offload")
         enable_model_cpu_offload        = data.get("enable_model_cpu_offload")
 
-        # asyncdiff
-        ad_config = data.get("backend_config")
-        assert ad_config is not None, "AsyncDiff configuration must be provided"
-        asyncdiff_config = ad_config
-
         print_params(data)
 
         # checks
@@ -280,6 +157,7 @@ def __apply_pipeline_parallel(data):
                 kwargs["local_files_only"] = True
                 kwargs["low_cpu_mem_usage"] = True
                 kwargs["add_watermarker"] = False
+                kwargs["device_map"] = "balanced"
 
                 # quantize
                 is_quantized = False
@@ -360,28 +238,6 @@ def __apply_pipeline_parallel(data):
                 del kwargs
                 log("Pipeline initialized")
 
-                # group-offloading
-                # onload_device = get_pipe().device
-                # offload_device = torch.device("cpu")
-                # apply_group_offloading(get_pipe().text_encoder,
-                #     onload_device=onload_device,
-                #     offload_device=offload_device,
-                #     offload_type="block_level",
-                #     num_blocks_per_group=4
-                # )
-                # get_pipe().transformer.enable_group_offload(
-                #     onload_device=onload_device,
-                #     offload_device=offload_device,
-                #     offload_type="leaf_level",
-                #     use_stream=True
-                # )
-
-                # for debug - to print model
-                if get_local_rank() == 0:
-                    # log(str(get_pipe().transformer))
-                    # raise ValueError
-                    pass
-
                 # set ipadapter
                 if ip_adapter is not None:
                     load_ip_adapter(ip_adapter)
@@ -428,24 +284,6 @@ def __apply_pipeline_parallel(data):
                     if compile_vae:                            compile_helper("vae", compiler_config)
                     if compile_encoder:                        compile_helper("encoder", compiler_config)
 
-                # set asyncdiff
-                if pipeline_type in ["ad"]:
-                    ad_class = AsyncDiffAnimateDiff
-                elif pipeline_type in ["flux"]:
-                    ad_class = AsyncDiffFlux
-                elif pipeline_type in ["sd3"]:
-                    ad_class = AsyncDiffStableDiffusion3
-                elif pipeline_type in ["wani2v", "want2v"]:
-                    ad_class = AsyncDiffWan
-                elif pipeline_type in ["zimage"]:
-                    ad_class = AsyncDiffZImage
-                else:
-                    ad_class = AsyncDiffStableDiffusion
-                async_diff = ad_class(get_pipe(), pipeline_type, model_n=asyncdiff_config.get("model_n"), stride=asyncdiff_config.get("stride"), time_shift=asyncdiff_config.get("time_shift"))
-
-                # set progress bar visibility
-                get_pipe().set_progress_bar_config(disable=get_local_rank() != 0)
-
                 # set models to eval mode
                 setup_evals()
 
@@ -453,10 +291,8 @@ def __apply_pipeline_parallel(data):
                 clean()
 
                 # complete
-                dist.barrier()
                 log("Model initialization completed")
-                if get_local_rank() == 0:
-                    print_mem_usage()
+                print_mem_usage()
                 applied = data
                 return "", 200
     except:
@@ -508,7 +344,6 @@ def __generate_image_parallel(data):
     if denoising_start is None or denoising_start < 0:                  denoising_start = 0
     if denoising_end is None or denoising_end > steps:                  denoising_end = steps
 
-    if applied is None: __close_pipeline()
     pipeline_type = applied.get("pipeline_type")
 
     # checks
@@ -518,12 +353,12 @@ def __generate_image_parallel(data):
         return { "message": "No IPAdapter image provided for a IPAdapter-loaded pipeline", "output": None, "is_image": False }
     if applied.get("control_net") is not None and control_image is None:
         return { "message": "No ConstrolNet image provided for a ControlNet-loaded pipeline", "output": None, "is_image": False }
+    if use_compel is not None and use_compel == True:
+        return { "message": "This backend does not support Compel. You must encode the prompt(s) first using Compel externally.", "output": None, "is_image": False }
 
     with torch.no_grad():
         with torch.amp.autocast("cuda", enabled=False):
-            __move_pipe(f"cuda:{dist.get_rank()}")
             torch.cuda.reset_peak_memory_stats()
-            __reset_asyncdiff(steps)
             set_progress(0)
 
             # load image
@@ -544,29 +379,22 @@ def __generate_image_parallel(data):
                 global get_logger, get_scheduler_progressbar_offset_index, set_progress
                 nonlocal steps
                 the_index = get_scheduler_progressbar_offset_index(pipe.scheduler, index)
-                log(str(callback_kwargs["latents"]), rank_0_only=True)
+                log(str(callback_kwargs["latents"]))
                 set_progress(int(the_index / steps * 100))
                 return callback_kwargs
 
             # set seed
             generator = torch.Generator(device="cpu").manual_seed(seed)
 
-            # compel
+            # conditioning
             positive_pooled_embeds = None
             negative_pooled_embeds = None
-            if use_compel == True and pipeline_type in COMPEL_SUPPORTED_MODELS and positive_embeds is None and negative_embeds is None:
-                if pipeline_type in ["sd1", "sd2"]: embeddings_type = ReturnedEmbeddingsType.PENULTIMATE_HIDDEN_STATES_NORMALIZED
-                else:                           embeddings_type = ReturnedEmbeddingsType.PENULTIMATE_HIDDEN_STATES_NON_NORMALIZED
-                compel = Compel(
-                    tokenizer=[get_pipe().tokenizer, get_pipe().tokenizer_2],
-                    text_encoder=[get_pipe().text_encoder, get_pipe().text_encoder_2],
-                    returned_embeddings_type=embeddings_type,
-                    requires_pooled=[False, True],
-                    truncate_long_prompts=False,
-                )
-                positive_embeds, positive_pooled_embeds = compel([positive])
-                if negative is not None and len(negative) > 0: negative_embeds, negative_pooled_embeds = compel([negative])
-                positive = negative = None
+            if positive_embeds is not None:
+                positive_pooled_embeds = positive_embeds[0][1]["pooled_output"]
+                positive_embeds = positive_embeds[0][0]
+            if negative_embeds is not None:
+                negative_pooled_embeds = negative_embeds[0][1]["pooled_output"]
+                negative_embeds = negative_embeds[0][0]
 
             # set pipe
             kwargs                                          = {}
@@ -614,14 +442,6 @@ def __generate_image_parallel(data):
                     # if negative_embeds is not None:         kwargs["negative_embeds"]           = negative_embeds
                     # if negative_pooled_embeds is not None:  kwargs["negative_pooled_embeds"]    = negative_pooled_embeds
                 case _:
-                    if use_compel != True:
-                        if positive_embeds is not None:
-                            positive_pooled_embeds = positive_embeds[0][1]["pooled_output"]
-                            positive_embeds = positive_embeds[0][0]
-                        if negative_embeds is not None:
-                            negative_pooled_embeds = negative_embeds[0][1]["pooled_output"]
-                            negative_embeds = negative_embeds[0][0]
-
                     if latent is not None:
                         kwargs["latents"] = latent
                     else:
@@ -649,35 +469,35 @@ def __generate_image_parallel(data):
                     kwargs["output_type"] = "latent"
 
             # inference
-            dist.barrier()
             output = get_pipe()(**kwargs)
-
-            if use_compel == True:
-                # https://github.com/damian0815/compel/issues/24
-                positive_embeds = positive_pooled_embeds = negative_embeds = negative_pooled_embeds = None
 
             # clean up
             clean()
 
             # output
-            if get_local_rank() == 0:
-                set_progress(100)
-                if output is not None:
-                    if get_is_image_model(pipeline_type):
-                        if pipeline_type in ["sdup"]:
-                            output = output.images[0]
-                        else:
-                            output_images = output.images
-                            if pipeline_type in ["flux"]:
-                                output_images = get_pipe()._unpack_latents(output_images, height, width, get_pipe().vae_scale_factor)
-                            images = convert_latent_to_image(output_images)
-                            latents = convert_latent_to_output_latent(output_images)
-                            return { "message": "OK", "output": pickle_and_encode_b64(images[0]), "latent": pickle_and_encode_b64(latents), "is_image": True }
+            set_progress(100)
+            if output is not None:
+                if get_is_image_model(pipeline_type):
+                    if pipeline_type in ["sdup"]:
+                        output = output.images[0]
                     else:
-                        output = output.frames[0]
-                    return { "message": "OK", "output": pickle_and_encode_b64(output), "is_image": False }
+                        output_images = output.images
+                        if pipeline_type in ["flux"]:
+                            output_images = get_pipe()._unpack_latents(output_images, height, width, get_pipe().vae_scale_factor)
+                        flag = False
+                        if get_pipe().vae.device == torch.device("cpu"):
+                            flag = True
+                            get_pipe().vae = get_pipe().vae.to(device=output_images.device)
+                        images = convert_latent_to_image(output_images)
+                        latents = convert_latent_to_output_latent(output_images)
+                        if flag:
+                            get_pipe().vae = get_pipe().vae.to(device="cpu")
+                        return { "message": "OK", "output": pickle_and_encode_b64(images[0]), "latent": pickle_and_encode_b64(latents), "is_image": True }
                 else:
-                    return { "message": "No image from pipeline", "output": None, "is_image": False }
+                    output = output.frames[0]
+                return { "message": "OK", "output": pickle_and_encode_b64(output), "is_image": False }
+            else:
+                return { "message": "No image from pipeline", "output": None, "is_image": False }
 
 
 if __name__ == "__main__":

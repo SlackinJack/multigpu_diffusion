@@ -1,5 +1,5 @@
-import copy
 import gc
+import inspect
 import json
 import logging
 import numpy
@@ -8,6 +8,7 @@ import safetensors
 import torch
 from diffusers import (
     AutoencoderKL,
+    AutoModel,
     ControlNetModel,
     GGUFQuantizationConfig,
     FluxTransformer2DModel,
@@ -34,72 +35,63 @@ from PIL import Image
 from modules.scheduler_config import get_scheduler, get_scheduler_name,  get_scheduler_supports_setting_timesteps, get_scheduler_supports_setting_sigmas
 
 
+local_rank = -1
+def set_local_rank(rank):
+    global local_rank
+    local_rank = rank
+    return
+
+def get_local_rank():
+    global local_rank
+    assert local_rank > -1, "Distributed environment has not been initialized!"
+    return local_rank
+
+
 GENERIC_HOST_ARGS = {
-    # models
-    "unet":                         str,    # path
-    "unet_config":                  str,    # path
-    "transformer":                  str,    # path
-    "transformer_config":           str,    # path
-    "vae":                          str,    # path
-    "vae_config":                   str,    # path
-    "motion_module":                str,    # path
-    "motion_adapter":               str,    # path
-    "motion_lora":                  str,    # path
-    "motion_config":                str,    # path
-    "control_net":                  str,    # dict > { "path": scale }
-    "control_net_config":           str,    # path
-    "ip_adapter":                   str,    # dict > { "path": scale, ... }
-    "lora":                         str,    # dict > { "path": scale, ... }
-
-    # image
-    "scheduler":                    str,    # dict > { "key": value, ... }
-
-    # video
-
-    # optimization
-    "torch_cache_limit":            int,
-    "torch_accumlated_cache_limit": int,
-    "compile_backend":              str,    # [inductor, eager, ...]
-    "compile_mode":                 str,    # [default, reduce-overhead, max-autotune, max-auto-no-cudagraphs, ...]
-    "compile_options":              str,    # dict > { "triton.cudagraphs": true, ... }
-    "quantize_unet":                str,
-    "quantize_encoder":             str,
-    "quantize_vae":                 str,
-    "quantize_tokenizer":           str,
-    "quantize_scheduler":           str,
-    "quantize_misc":                str,
-
-    # host
-    "checkpoint":                   str,    # path
-    "type":                         str,    # sd1, sd2, sd3, sdxl, etc.
-    "port":                         int,
-    "variant":                      str,
-    "warm_up_steps":                int,
+    "port": int,
 }
 
 
 GENERIC_HOST_ARGS_TOGGLES = [
-    # optimization
-    "torch_capture_scalar",
-    "compile_unet",
-    "compile_vae",
-    "compile_encoder",
-    "compile_fullgraph_off",
-    "enable_vae_tiling",
-    "enable_vae_slicing",
-    "xformers_efficient",
-    "enable_model_cpu_offload",
-    "enable_sequential_cpu_offload",
-
-    # host
-    "compel",
 ]
+
+
+vae_fp16 = False
+def set_vae_fp16(is_fp16):
+    global vae_fp16
+    vae_fp16 = is_fp16
+    return
+
+
+def get_vae_dtype():
+    global vae_fp16
+    if vae_fp16:    return torch.float16
+    else:           return torch.float32
+
+
+torch_dtype = torch.float16
+def set_torch_dtype(dtype):
+    global torch_dtype
+    torch_dtype = dtype
+    return
+
+
+def get_torch_dtype():
+    global torch_dtype
+    return torch_dtype
+
+
+def get_is_image_model(model):
+    if model in ["ad", "svd", "wani2v"]:
+        return False
+    return True
 
 
 initialized = False
 def set_initialized(is_initialized):
     global initialized
     initialized = is_initialized
+    if not is_initialized: clean()
     return
 
 
@@ -109,8 +101,8 @@ def get_initialized():
 
 
 def get_initialized_flask():
-    if get_initialized():   return "OK", 200
-    else:                   return "WAIT", 202
+    if get_initialized():   return "", 200
+    else:                   return "", 202
 
 
 progress = 0
@@ -134,6 +126,7 @@ pipe = None
 def set_pipe(pipe_in):
     global pipe
     pipe = pipe_in
+    if pipe_in is None: clean()
     return
 
 
@@ -165,18 +158,21 @@ def setup_torch_backends():
 
 
 logger = None
-def set_logger(local_rank):
+def set_logger():
     global logger
+
     if logger is None:
         logging.root.setLevel(logging.NOTSET)
         logging.basicConfig(level=logging.INFO)
-        logger = logging.getLogger(f"[Rank {str(local_rank)}]")
+        logger = logging.getLogger(f"[Rank {str(get_local_rank())}]")
     return
 
 
-def get_logger():
+def log(text, rank_0_only=False):
     global logger
-    return logger
+    if rank_0_only == True and get_local_rank() != 0: return
+    logger.info(text)
+    return
 
 
 def get_torch_type(t):
@@ -204,53 +200,61 @@ def get_torch_type(t):
         case _:         return None
 
 
-def set_scheduler(args):
+def set_scheduler(scheduler_config):
     global pipe
-    if args.scheduler is not None:
-        args.scheduler = json.loads(args.scheduler)
-        pipe.scheduler = get_scheduler(args.scheduler, pipe.scheduler.config)
+    params = json.loads(scheduler_config)
+    pipe.scheduler = get_scheduler(params, {})
+    pipe.scheduler.set_timesteps(pipe.scheduler.config.num_train_timesteps)
+    pipe.scheduler = get_scheduler(params, pipe.scheduler.config)
     return
 
 
-def load_lora(lora_dict, rank):
+def load_lora(loras):
     global logger, pipe
-    loras = json.loads(lora_dict)
+    # loras = json.loads(lora_dict)
     names = []
 
     for k, v in loras.items():
-        logger.info(f"loading lora: {k}")
-        if k.endswith(".safetensors") or k.endswith(".sft"):    weights = safetensors.torch.load_file(k, device=f'cuda:{rank}')
-        else:                                                   weights = torch.load(k, map_location=torch.device(f'cuda:{rank}'))
+        log(f"loading lora: {k}")
+        if k.endswith(".safetensors") or k.endswith(".sft"):    weights = safetensors.torch.load_file(k, device=f'cuda:{get_local_rank()}')
+        else:                                                   weights = torch.load(k, map_location=torch.device(f'cuda:{get_local_rank()}'))
         w = k.split("/")[-1]
         a = w if not "." in w else w.split(".")[0]
         names.append(a)
         pipe.load_lora_weights(weights, weight_name=w, adapter_name=a, local_files_only=True, low_cpu_mem_usage=True)
         del weights
-        logger.info(f"Added LoRA (scale={v}): {k}")
+        log(f"Added LoRA (scale={v}): {k}")
 
     pipe.unet.set_adapters(names, list(loras.values()))
     loaded_adapters = pipe.unet.active_adapters()
-    logger.info(f'Total loaded LoRAs: {len(loaded_adapters)}')
-    logger.info(f'Adapters: {str(loaded_adapters)}')
+    log(f'Total loaded LoRAs: {len(loaded_adapters)}')
+    log(f'Adapters: {str(loaded_adapters)}')
     return names
 
 
-def load_ip_adapter(ip_adapter_dict):
+def load_ip_adapter(ip_adapter):
     global pipe
-    for m, s in ip_adapter_dict.items():
-        split = m.split("/")
-        ip_adapter_file = split[-1]
-        ip_adapter_subfolder = split[-2]
-        ip_adapter_folder = m.replace(f'/{ip_adapter_subfolder}/{ip_adapter_file}', "")
-        pipe.load_ip_adapter(
-            ip_adapter_folder,
-            subfolder=ip_adapter_subfolder,
-            weight_name=ip_adapter_file,
-            use_safetensors=False, # NOTE: safetensors off
-            local_files_only=True,
-            low_cpu_mem_usage=True,
-        )
-        pipe.set_ip_adapter_scale(s)
+    kwargs = {}
+    split = ip_adapter.split("/")
+
+    ip_adapter_file = split[-1]
+    kwargs["weight_name"] = ip_adapter_file
+
+    ip_adapter_subfolder = split[-2]
+    kwargs["subfolder"] = ip_adapter_subfolder
+
+    ip_adapter_folder = ip_adapter.replace(f'/{ip_adapter_subfolder}/{ip_adapter_file}', "")
+
+    if "vit-h" in ip_adapter_file.lower():
+        kwargs["image_encoder_folder"] = ip_adapter.replace(f'/{ip_adapter_subfolder}/{ip_adapter_file}', "/models/image_encoder")
+
+    pipe.load_ip_adapter(
+        ip_adapter_folder,
+        use_safetensors=False, # NOTE: safetensors off
+        local_files_only=True,
+        low_cpu_mem_usage=True,
+        **kwargs
+    )
     return
 
 
@@ -265,8 +269,10 @@ def __get_compiler_config(compiler_config):
     return config_compiler["backend"], config_compiler["mode"], config_compiler["fullgraph"]
 
 
-# TODO: implement
-def load_pipeline(model_path, model_type, torch_dtype):
+# TODO: implement, required for pipeline .safetensors
+def load_pipeline(model_path, model_type):
+    global torch_dtype
+
     if not model_path.endswith(".safetensors") and not model_path.endswith(".sft"):
         return None
 
@@ -286,10 +292,9 @@ def load_pipeline(model_path, model_type, torch_dtype):
     return None
 
 
-# TODO: implement
-def load_model(model_path, config_path, model_type, torch_dtype):
-    config = {}
-
+def load_model(model_path, config_path, model_type):
+    global torch_dtype
+    log("Loading model: " + model_path + " with config: " + str(config_path))
     kwargs = {}
     kwargs["torch_dtype"] = torch_dtype
     kwargs["use_safetensors"] = True
@@ -308,11 +313,12 @@ def load_model(model_path, config_path, model_type, torch_dtype):
         kwargs["use_safetensors"] = False # NOTE: safetensors off
 
     if not is_checkpoint:
+        assert config_path is not None and len(config_path) > 0, "You must provide a config_path when loading from a single file"
         kwargs["config"] = config_path
 
     match model_type:
         case "AutoencoderKL":
-            kwargs["torch_dtype"] = torch.float32
+            kwargs["torch_dtype"] = get_vae_dtype()
             if is_checkpoint:
                 return AutoencoderKL.from_pretrained(model_path, **kwargs)
             else:
@@ -331,7 +337,6 @@ def load_model(model_path, config_path, model_type, torch_dtype):
             if is_checkpoint:
                 return MotionAdapter.from_pretrained(model_path, **kwargs)
             else:
-                kwargs["config"] = f"{os.path.dirname(__file__)}/../resources/generic_motion_adapter_config.json"
                 return MotionAdapter.from_single_file(model_path, **kwargs)
         case "SD3Transformer2DModel":
             if is_checkpoint:
@@ -348,67 +353,92 @@ def load_model(model_path, config_path, model_type, torch_dtype):
                 return ZImageTransformer2DModel.from_pretrained(model_path, **kwargs)
             else:
                 return ZImageTransformer2DModel.from_single_file(model_path, **kwargs)
+        case _:
+            if is_checkpoint:
+                return AutoModel.from_pretrained(model_path, **kwargs)
     return None
 
 
-# TODO: implement
 def setup_evals():
     global pipe
-
-    transformer = getattr(pipe, "transformer", None)
-    if transformer is not None:
-        pipe.transformer.eval()
-
-    unet = getattr(pipe, "unet", None)
-    if unet is not None:
-        pipe.unet.eval()
-
-    text_encoder = getattr(pipe, "text_encoder", None)
-    if text_encoder is not None:
-        pipe.text_encoder.eval()
-
-    text_encoder_2 = getattr(pipe, "text_encoder_2", None)
-    if text_encoder_2 is not None:
-        pipe.text_encoder_2.eval()
-
-    text_encoder_3 = getattr(pipe, "text_encoder_3", None)
-    if text_encoder_3 is not None:
-        pipe.text_encoder_3.eval()
-
-    image_encoder = getattr(pipe, "image_encoder", None)
-    if image_encoder is not None:
-        pipe.image_encoder.eval()
-
-    vae = getattr(pipe, "vae", None)
-    if vae is not None:
-        pipe.vae.eval()
-
-    controlnet = getattr(pipe, "controlnet", None)
-    if controlnet is not None:
-        pipe.controlnet.eval()
-
-    motion_adapter = getattr(pipe, "motion_adapter", None)
-    if motion_adapter is not None:
-        pipe.motion_adapter.eval()
-
+    for k, v in get_pipe().components.items():
+        try: v.eval()
+        except: pass
     return
 
 
 def get_quant_mapping(target, quantize_to):
     out = {}
     config = None
-    if quantize_to.startswith("tao,"):
-        quantize_to = quantize_to.replace("tao,", "")
-        config = get_torchao_map(quantize_to)
-    elif quantize_to.startswith("bnb,"):
-        quantize_to = quantize_to.replace("bnb,", "")
-        config = get_bnb_map(quantize_to)
+
+    backend = quantize_to.pop("backend")
+    match backend:
+        case "bitsandbytes":
+            load_in_8bit = quantize_to.get("load_in_8bit")
+            load_in_4bit = quantize_to.get("load_in_4bit")
+            assert not (load_in_8bit == True and load_in_4bit == True), "Select either 4-bit or 8-bit quantization, but not both"
+            c = {}
+            if load_in_8bit == True:
+                for k,v in quantize_to.items():
+                    if "4bit" in k: continue
+                    c[k] = v
+            elif load_in_4bit == True:
+                for k,v in quantize_to.items():
+                    if "int8" in k: continue
+                    if k in ["bnb_4bit_compute_dtype", "bnb_4bit_quant_storage"]: v = get_torch_type(v)
+                    c[k] = v
+            else:
+                return None
+            log(c)
+            config = [BitsAndBytesConfigD(**c), BitsAndBytesConfigT(**c)]
+        case "torchao":
+            def get_torchao_config(t):
+                if t == "int4wo":
+                    return "int4_weight_only"
+                elif t == "int4dq":
+                    return "int8_dynamic_activation_int4_weight"
+                elif t == "int8wo":
+                    return "int8_weight_only"
+                elif t == "int8dq":
+                    return "int8_dynamic_activation_int8_weight"
+                elif t.startswith("uint") and t.endswith("wo"):
+                    # uint1wo, uint2wo, uint3wo, uint4wo, uint5wo, uint6wo, uint7wo
+                    t = t.replace("uint", "").replace("wo", "")
+                    match t:
+                        case "1": t = torch.uint1
+                        case "2": t = torch.uint2
+                        case "3": t = torch.uint3
+                        case "4": t = torch.uint4
+                        case "5": t = torch.uint5
+                        case "6": t = torch.uint6
+                        case "7": t = torch.uint7
+                        case _: return None
+                    return UIntXWeightOnlyConfig(dtype=t)
+                elif t == "float8wo":
+                    # float8wo
+                    return "float8_weight_only"
+                elif t.startswith("fp") and "_" in t and "e" in t and "w" in t:
+                    # fpX_eAwB where X is the number of bits (1-7), A is exponent bits, and B is mantissa bits. Constraint: X == A + B + 1
+                    t = t.replace("fp", "").replace("_", "").replace("e", "").replace("w", "")
+                    try:
+                        x = int(t[0])
+                        a = int(t[1])
+                        b = int(t[2])
+                        if x == a + b + 1:
+                            return FPXWeightOnlyConfig(ebits=a, mbits=b)
+                    except:
+                        return None
+                return None
+            quant_type = get_torchao_config(quantize_to["quant_type"])
+            if quant_type is not None:  config = [TorchAoConfigD(quant_type), TorchAoConfigT(quant_type)]
+            else:                       return None
 
     if config is not None:
         match target:
             case "unet":
                 config = config[0]
                 out["transformer"] = config
+                out["transformer_2"] = config
                 out["unet"] = config
             case "encoder":
                 config = config[1]
@@ -423,81 +453,12 @@ def get_quant_mapping(target, quantize_to):
                 config = config[0]
                 out["tokenizer"] = config
                 out["tokenizer_2"] = config
-            case "scheduler":
-                config = config[0]
-                out["scheduler"] = config
             case "misc":
                 config = config[0]
                 out["controlnet"] = config
                 out["motion_adapter"] = config
+                out["image_processor"] = config
     return out
-
-
-def get_bnb_map(quantize_to):
-    out = {}
-    def get_bitsandbytes_config(t):
-        c = {}
-        if t.startswith("int8"):
-            # int8
-            c["load_in_8bit"] = True
-            return c
-        elif t.startswith("int4"):
-            # int4,compute_type,quant_storage,quant_type
-            t = t.split(",")
-            if len(t) == 4:
-                c["load_in_4bit"] = True
-                c["bnb_4bit_compute_dtype"] = get_torch_type(t[1])
-                c["bnb_4bit_quant_storage"] = get_torch_type(t[2])
-                c["bnb_4bit_quant_type"] = t[3]
-                return c
-        return None
-
-    t = get_bitsandbytes_config(quantize_to)
-    if t is not None:
-        return [BitsAndBytesConfigD(**t), BitsAndBytesConfigT(**t)]
-    return None
-
-
-def get_torchao_map(quantize_to):
-    out = {}
-    def get_torchao_config(t):
-        if t == "int4wo":
-            return "int4_weight_only"
-        elif t == "int8wo":
-            return "int8_weight_only"
-        elif t.startswith("uint") and t.endswith("wo"):
-            # uint1wo, uint2wo, uint3wo, uint4wo, uint5wo, uint6wo, uint7wo
-            t = t.replace("uint", "").replace("wo", "")
-            match t:
-                case "1": t = torch.uint1
-                case "2": t = torch.uint2
-                case "3": t = torch.uint3
-                case "4": t = torch.uint4
-                case "5": t = torch.uint5
-                case "6": t = torch.uint6
-                case "7": t = torch.uint7
-                case _: return None
-            return UIntXWeightOnlyConfig(dtype=t)
-        elif t == "float8wo":
-            # float8wo
-            return "float8_weight_only"
-        elif t.startswith("fp") and "_" in t and "e" in t and "w" in t:
-            # fpX_eAwB where X is the number of bits (1-7), A is exponent bits, and B is mantissa bits. Constraint: X == A + B + 1
-            t = t.replace("fp", "").replace("_", "").replace("e", "").replace("w", "")
-            try:
-                x = int(t[0])
-                a = int(t[1])
-                b = int(t[2])
-                if x == a + b + 1:
-                    return FPXWeightOnlyConfig(ebits=a, mbits=b)
-            except:
-                return None
-        return None
-
-    t = get_torchao_config(quantize_to)
-    if t is not None:
-        return [TorchAoConfigD(t), TorchAoConfigT(t)]
-    return None
 
 
 def get_pipe_quant_config(mapping):
@@ -506,13 +467,15 @@ def get_pipe_quant_config(mapping):
 
 def compile_helper(target, compile_config, adapter_names=None):
     global logger, pipe
-    logger.info(f"compiling {target}")
+    log(f"compiling {target}")
     match target:
         case "transformer":
             if adapter_names is not None:
                 pipe.transformer.fuse_lora(adapter_names=adapter_names, lora_scale=1.0)
                 pipe.unload_lora_weights()
             pipe.transformer = torch.compile(pipe.transformer, **compile_config)
+            if hasattr(pipe, "transformer_2") and pipe.transformer_2 is not None:
+                pipe.transformer_2 = torch.compile(pipe.text_encoder, **compile_config)
         case "unet":
             if adapter_names is not None:
                 pipe.unet.fuse_lora(adapter_names=adapter_names, lora_scale=1.0)
@@ -530,67 +493,37 @@ def compile_helper(target, compile_config, adapter_names=None):
             if hasattr(pipe, "image_encoder") and pipe.image_encoder is not None:
                 pipe.image_encoder = torch.compile(pipe.image_encoder, **compile_config)
         case _:
-            logger.info("unknown compile target - not compiling")
+            log("unknown compile target - not compiling")
             return
 
-    logger.info(f"compiled {target}")
-    return
-
-
-# for xdit_usp only
-def compile_model(logger):
-    global pipe
-
-    backend, mode, fullgraph = __get_compiler_config()
-    logger.info(f"compiling model with {backend}:{mode}, fullgraph={fullgraph}")
-    if len(mode) > 0:   pipe.model = torch.compile(pipe.model, backend=backend, mode=mode, fullgraph=fullgraph, dynamic=False)
-    else:               pipe.model = torch.compile(pipe.model, backend=backend, fullgraph=fullgraph, dynamic=False)
-    logger.info(f"compiled model")
+    log(f"compiled {target}")
     return
 
 
 def print_params(data):
     global logger
-    params = {
-        "height":               data.get("height"),
-        "width":                data.get("width"),
-        "positive":             data.get("positive"),
-        "negative":             data.get("negative"),
-        "positive_embeds":      (data.get("positive_embeds") is not None),
-        "negative_embeds":      (data.get("negative_embeds") is not None),
-        "image":                (data.get("image") is not None),
-        "ip_image":             (data.get("ip_image") is not None),
-        "control_image":        (data.get("control_image") is not None),
-        "latent":               (data.get("latent") is not None),
-        "steps":                data.get("steps"),
-        "cfg":                  data.get("cfg"),
-        "controlnet_scale":     data.get("controlnet_scale"),
-        "seed":                 data.get("seed"),
-        "frames":               data.get("frames"),
-        "decode_chunk_size":    data.get("decode_chunk_size"),
-        "clip_skip":            data.get("clip_skip"),
-        "motion_bucket_id":     data.get("motion_bucket_id"),
-        "noise_aug_strength":   data.get("noise_aug_strength"),
-        "sigmas":               (data.get("sigmas") is not None),
-        "timesteps":            (data.get("timesteps") is not None),
-        "denoising_start":      data.get("denoising_start"),
-        "denoising_end":        data.get("denoising_end"),
-    }
     formatted = "Received parameters:"
-    for k, v in params.items():
-        formatted += f'\n{k}:{str(v)}'
-    logger.info(formatted)
+    for k, v in data.items():
+        if torch.is_tensor(v) or len(str(v)) > 256:
+            formatted += f'\n{k}:{str(v is not None)}'
+        else:
+            formatted += f'\n{k}:{str(v)}'
+    log(formatted, rank_0_only=True)
     return
 
 
-def print_mem_usage():
+def print_mem_usage(with_devices=False):
     global logger, pipe
     mem_usage_string = f'\n{"#" * 32}\n\nMemory usage:\n'
     for k, v in pipe.components.items():
         try:    mem = round(v.get_memory_footprint() / 1024 / 1024, 1)
         except: mem = "?"
-        mem_usage_string += f"    {k}: {mem} MB\n"
-    logger.info(f'{mem_usage_string}\n{"#" * 32}')
+        mem_usage_string += f"    {k}: {mem} MB"
+        if with_devices:
+            try:    mem_usage_string += f" ({str(v.device)})"
+            except: pass
+        mem_usage_string += "\n"
+    log(f'{mem_usage_string}\n{"#" * 32}', rank_0_only=True)
     return
 
 
@@ -605,21 +538,42 @@ def normalize_latent(x, max_val=3.0):
     return x
 
 
-def process_input_latent(latents, dtype, device, timestep=None):
-    global pipe
+def set_scheduler_timesteps(start=0):
+    global logger, pipe
 
+    pipe_module = inspect.getmodule(pipe.__class__)
+    if pipe_module is not None:
+        if hasattr(pipe_module, 'old_retrieve_timesteps'):
+            setattr(pipe_module, 'retrieve_timesteps', getattr(pipe_module, 'old_retrieve_timesteps'))
+            delattr(pipe_module, 'old_retrieve_timesteps')
+            if hasattr(pipe_module, 'new_retrieve_timesteps'):
+                delattr(pipe_module, 'new_retrieve_timesteps')
+
+        old_retrieve_timesteps = getattr(pipe_module, 'retrieve_timesteps', None)
+        setattr(pipe_module, 'old_retrieve_timesteps', old_retrieve_timesteps)
+
+        def new_retrieve_timesteps(*args, **kwargs):
+            nonlocal start
+            result = lambda: old_retrieve_timesteps(*args, **kwargs)
+            timesteps, num_inference_steps = result()
+
+            if len(timesteps) > 0 and start > 0:
+                log("Old timesteps: " + str(timesteps), rank_0_only=True)
+                timesteps = pipe.scheduler.timesteps[start * pipe.scheduler.order :]
+                if hasattr(pipe.scheduler, "set_begin_index"):
+                    pipe.scheduler.set_begin_index(start * pipe.scheduler.order)
+
+                log("New timesteps: " + str(timesteps), rank_0_only=True)
+            return timesteps, num_inference_steps - start
+        setattr(pipe_module, 'retrieve_timesteps', new_retrieve_timesteps)
+    return
+
+
+def process_input_latent(latents):
+    global logger, pipe, torch_dtype
     latents = add_alpha_to_latent(latents)
-    latents = latents.to(pipe.device)
-
-    if timestep == None:    latents = pipe.scheduler.scale_model_input(latents, timestep=p.scheduler.timesteps[-1])
-    else:                   latents = pipe.scheduler.scale_model_input(latents, timestep=timestep)
-    latents = latents * pipe.vae.config.scaling_factor
-
-    target = 255
-    latents = normalize_latent(latents, max_val=target)
-    #latents = latents * (68.5 / 100)
-
-    latents = latents.to(dtype)
+    latents = latents.to(device=pipe.device, dtype=torch_dtype)
+    # latents = normalize_latent(latents, max_val=3)
     return latents
 
 
@@ -638,18 +592,18 @@ def remove_alpha_from_latent(latents):
 
 def process_latent_for_output(latents, is_latent_output):
     global pipe
-    default_vae_dtype = copy.copy(pipe.vae.dtype)
-    pipe.vae = pipe.vae.to(torch.float32)
-    latents = latents.to(torch.float32)
-    latents = latents / pipe.vae.config.scaling_factor
+    default_vae_dtype = pipe.vae.dtype
     latents = add_alpha_to_latent(latents)
-    latents = latents * (85.0 / 100)
+
     if is_latent_output:
-        pipe.vae = pipe.vae.to(default_vae_dtype)
         return latents
+
+    pipe.vae = pipe.vae.to(dtype=get_vae_dtype())
+    latents = latents.to(dtype=get_vae_dtype())
+    latents = latents / pipe.vae.config.scaling_factor
     latents = pipe.vae.decode(latents, return_dict=False)[0]
     latents = pipe.image_processor.postprocess(latents, output_type="pil")
-    pipe.vae = pipe.vae.to(default_vae_dtype)
+    pipe.vae = pipe.vae.to(dtype=default_vae_dtype)
     return latents
 
 
