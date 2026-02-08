@@ -12,6 +12,7 @@ from diffusers.schedulers import (
     EDMEulerScheduler,
     EulerAncestralDiscreteScheduler,
     EulerDiscreteScheduler,
+    FlowMatchEulerDiscreteScheduler,
     HeunDiscreteScheduler,
     IPNDMScheduler,
     LMSDiscreteScheduler,
@@ -51,6 +52,9 @@ def get_scheduler_class(scheduler_name):
 
         case "ipndm":           return IPNDMScheduler
 
+        # zimage
+        case "fm_euler":        return FlowMatchEulerDiscreteScheduler
+
         case _:                 raise NotImplementedError
 
 
@@ -75,6 +79,9 @@ def get_scheduler_name(scheduler):
         case "UniPCMultistepScheduler":         return "unipc"
 
         case "IPNDMScheduler":                  return "ipndm"
+
+        # zimage
+        case "FlowMatchEulerDiscreteScheduler": return "fm_euler"
 
         case _:                                 return None
 
