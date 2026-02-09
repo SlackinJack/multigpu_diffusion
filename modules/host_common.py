@@ -6,6 +6,7 @@ import numpy
 import os
 import safetensors
 import torch
+import traceback
 from diffusers import (
     AutoencoderKL,
     AutoModel,
@@ -360,20 +361,27 @@ class CommonHost:
 
 
     def load_lora(self, loras):
+        target = None
         if self.pipeline_type in ["sd1", "sd2", "sdxl"]:
+            target = self.pipe.unet
+        elif self.pipeline_type in ["sd3", "zimage"]:
+            target = self.pipe.transformer
+
+        if target is not None:
             names = []
             for k, v in loras.items():
                 self.log(f"loading lora: {k}")
                 if k.endswith(".safetensors") or k.endswith(".sft"):    weights = safetensors.torch.load_file(k, device=f'cuda:{self.local_rank}')
                 else:                                                   weights = torch.load(k, map_location=torch.device(f'cuda:{self.local_rank}'))
+                for k2,v2 in weights.items():                           weights[k2] = v2.to(device=target.device, dtype=target.dtype)
                 w = k.split("/")[-1]
                 a = w if not "." in w else w.split(".")[0]
                 names.append(a)
                 self.pipe.load_lora_weights(weights, weight_name=w, adapter_name=a, local_files_only=True, low_cpu_mem_usage=True)
                 self.log(f"Added LoRA (scale={v}): {k}")
 
-            self.pipe.unet.set_adapters(names, list(loras.values()))
-            loaded_adapters = self.pipe.unet.active_adapters()
+            target.set_adapters(names, list(loras.values()))
+            loaded_adapters = target.active_adapters()
             self.log(f'Total loaded LoRAs: {len(loaded_adapters)}')
             self.log(f'Adapters: {str(loaded_adapters)}')
             if len(names) > 0:  self.adapter_names = names
@@ -587,7 +595,7 @@ class CommonHost:
 
                 # for debugging
                 if self.local_rank == 0:
-                    # log(str(self.pipe.transformer))
+                    # self.log("\n\n\n" + str(self.pipe.transformer) + "\n\n\n")
                     # raise ValueError
                     pass
 
@@ -1043,6 +1051,7 @@ class CommonHost:
                 if data["frames"] is not None:                  kwargs["num_frames"]            = data["frames"]
             case "zimage": # TODO: complete
                 kwargs["output_type"]                           = "latent"
+                kwargs["guidance_scale"]                        = data["cfg"]
                 if data["height"] is not None:                  kwargs["height"]                = data["height"]
                 if data["width"] is not None:                   kwargs["width"]                 = data["width"]
                 if data["positive"] is not None:                kwargs["prompt"]                = data["positive"]
@@ -1053,7 +1062,20 @@ class CommonHost:
                 if data["negative_embeds"] is not None:
                     kwargs["negative_pooled_embeds"]            = data["negative_embeds"][0][1]["pooled_output"]
                     kwargs["negative_embeds"]                   = data["negative_embeds"][0][0]
-            case _:
+            case "flux": # TODO: complete
+                kwargs["output_type"]                           = "latent"
+                kwargs["guidance_scale"]                        = data["cfg"]
+                if data["height"] is not None:                  kwargs["height"]                = data["height"]
+                if data["width"] is not None:                   kwargs["width"]                 = data["width"]
+                if data["positive"] is not None:                kwargs["prompt"]                = data["positive"]
+                if data["negative"] is not None:                kwargs["negative_prompt"]       = data["negative"]
+                if data["positive_embeds"] is not None:
+                    kwargs["pooled_prompt_embeds"]              = data["positive_embeds"][0][1]["pooled_output"]
+                    kwargs["prompt_embeds"]                     = data["positive_embeds"][0][0]
+                if data["negative_embeds"] is not None:
+                    kwargs["negative_pooled_embeds"]            = data["negative_embeds"][0][1]["pooled_output"]
+                    kwargs["negative_embeds"]                   = data["negative_embeds"][0][0]
+            case _: # NOTE: "sd1", "sd2", "sd3", "sdxl"
                 kwargs["output_type"]                           = "latent"
                 kwargs["guidance_scale"]                        = data["cfg"]
                 if self.pipeline_type in ["sd1", "sd2", "sd3", "sdxl"]: kwargs["clip_skip"] = data["clip_skip"]
