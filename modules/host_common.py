@@ -105,35 +105,12 @@ def clean():
     return
 
 
-def setup_torch_dynamo(torch_config):
-    cache_size_limit                = torch_config.get("torch_cache_limit")
-    accumulated_cache_size_limit    = torch_config.get("torch_accumlated_cache_limit")
-    capture_scalar_outputs          = torch_config.get("torch_capture_scalar")
-    if cache_size_limit is not None:                torch._dynamo.config.cache_size_limit               = cache_size_limit
-    if accumulated_cache_size_limit is not None:    torch._dynamo.config.accumulated_cache_size_limit   = accumulated_cache_size_limit
-    if capture_scalar_outputs is not None:          torch._dynamo.config.capture_scalar_outputs         = capture_scalar_outputs
-    #torch._dynamo.config.suppress_errors           = True
-    return
-
-
-def setup_torch_backends():
-    # TODO: config
-    # TODO: this breaks flux
-    #torch.backends.cuda.enable_mem_efficient_sdp(False)
-    #torch.backends.cuda.enable_flash_sdp(False)
-    return
-
-
 def get_torch_type(t):
     match t:
         case "bf16":    return torch.bfloat16
         case "fp8":     return torch.float8_e4m3fn
         case "fp16":    return torch.float16
         case "fp32":    return torch.float32
-        case "fp64":    return torch.float64
-        case "cp32":    return torch.complex32
-        case "cp64":    return torch.complex64
-        case "cp128":   return torch.complex128
         case "int1":    return torch.uint1
         case "int2":    return torch.uint2
         case "int3":    return torch.uint3
@@ -144,7 +121,6 @@ def get_torch_type(t):
         case "int8":    return torch.uint8
         case "int16":   return torch.uint16
         case "int32":   return torch.uint32
-        case "int64":   return torch.uint64
         case "bool":    return torch.bool
         case _:         return None
 
@@ -154,10 +130,6 @@ def get_warmup_image():
     image = load_image(f"{os.path.dirname(__file__)}/../resources/rocket.png") # 1024x576 pixels
     image = image.resize((768, 432), Image.Resampling.LANCZOS)
     return image
-
-
-def __get_compiler_config(compiler_config):
-    return config_compiler["backend"], config_compiler["mode"], config_compiler["fullgraph"]
 
 
 def get_quant_mapping(target, quantize_to):
@@ -189,16 +161,18 @@ def get_quant_mapping(target, quantize_to):
             # https://github.com/vladmandic/sdnext/wiki/SDNQ-Quantization
             config = [SDNQConfig(
                 weights_dtype=quantize_to.get("quant_type"),
-                group_size=0,                                   # higher: faster, lower quality, use 0 if triton_is_available
-                svd_rank=16,                                    # higher: slower, higher quality (default: 32)
-                svd_steps=4,                                    # higher: slower, higher quality (default: 8)
-                dynamic_loss_threshold=1e-2,                    #
-                use_svd=False,                                  # true: slower, higher quality (default: False)
-                quant_conv=triton_is_available,                 # true: faster, lowers quality
-                use_quantized_matmul=triton_is_available,       # true: faster
-                use_quantized_matmul_conv=triton_is_available,  # true: faster
-                dequantize_fp32=False,                          # true: slower, higher quality
-                non_blocking=False,                             # ???
+                group_size=quantize_to.get("group_size"),                               # higher: faster, lower quality, use 0 if triton_is_available
+                svd_rank=quantize_to.get("svd_rank"),                                   # higher: slower, higher quality (default: 32)
+                svd_steps=quantize_to.get("svd_steps"),                                 # higher: slower, higher quality (default: 8)
+                dynamic_loss_threshold=quantize_to.get("dynamic_loss_threshold"),       #
+                use_svd=quantize_to.get("use_svd"),                                     # true: slower, higher quality (default: False)
+                quant_conv=quantize_to.get("quant_conv"),                               # true: faster, lowers quality
+                use_quantized_matmul=quantize_to.get("use_quantized_matmul"),           # true: faster
+                use_quantized_matmul_conv=quantize_to.get("use_quantized_matmul_conv"), # true: faster
+                dequantize_fp32=quantize_to.get("dequantize_fp32"),                     # true: slower, higher quality
+                non_blocking=quantize_to.get("non_blocking"),                           # ???
+                use_static_quantization=quantize_to.get("use_static_quantization"),        # ??? maybe inverse of use dynamic quantization
+                use_stochastic_rounding=quantize_to.get("use_stochastic_rounding"),        # ???
             )] * 2
         case "torchao":
             def get_torchao_config(t):
@@ -270,10 +244,6 @@ def get_quant_mapping(target, quantize_to):
     return out
 
 
-def get_pipe_quant_config(mapping):
-    return PipelineQuantizationConfig(quant_mapping=mapping)
-
-
 def get_quantization_config(quantization_config):
     mappings = {}
     quantize_transformer                    = quantization_config.get("transformer")
@@ -287,7 +257,7 @@ def get_quantization_config(quantization_config):
     if quantize_tokenizer is not None:      mappings.update(get_quant_mapping("tokenizer", quantize_tokenizer))
     if quantize_misc is not None:           mappings.update(get_quant_mapping("misc", quantize_misc))
     if len(list(mappings.keys())) > 0:
-        return get_pipe_quant_config(mappings)
+        return PipelineQuantizationConfig(quant_mapping=mappings)
 
 
 def normalize_latent(x, max_val=3.0):
@@ -317,7 +287,7 @@ def remove_alpha_from_latent(latents):
 class CommonHost:
     def __init__(self):
         self.local_rank = -1
-        self.vae_dtype = False
+        self.vae_dtype = None
         self.torch_dtype = torch.float16
         self.initialized = False
         self.progress = 0
@@ -352,65 +322,27 @@ class CommonHost:
         return
 
 
+    def get_applied(self):
+        return str(self.applied), 200
+
+
+    def close_pipeline(self):
+        self.vae_dtype = None
+        self.initialized = False
+        self.progress = 0
+        self.pipe = None
+        self.pipeline_type = None
+        self.default_scheduler = None
+        self.adapter_names = None
+        self.applied = None
+        return
+
+
     def set_scheduler(self, scheduler_config):
         params = json.loads(scheduler_config)
         self.pipe.scheduler = get_scheduler(params, {})
         self.pipe.scheduler.set_timesteps(self.pipe.scheduler.config.num_train_timesteps)
         self.pipe.scheduler = get_scheduler(params, self.pipe.scheduler.config)
-        return
-
-
-    def load_lora(self, loras):
-        target = None
-        if self.pipeline_type in ["sd1", "sd2", "sdxl"]:
-            target = self.pipe.unet
-        elif self.pipeline_type in ["sd3", "zimage"]:
-            target = self.pipe.transformer
-
-        if target is not None:
-            names = []
-            for k, v in loras.items():
-                self.log(f"loading lora: {k}")
-                if k.endswith(".safetensors") or k.endswith(".sft"):    weights = safetensors.torch.load_file(k, device=f'cuda:{self.local_rank}')
-                else:                                                   weights = torch.load(k, map_location=torch.device(f'cuda:{self.local_rank}'))
-                for k2,v2 in weights.items():                           weights[k2] = v2.to(device=target.device, dtype=target.dtype)
-                w = k.split("/")[-1]
-                a = w if not "." in w else w.split(".")[0]
-                names.append(a)
-                self.pipe.load_lora_weights(weights, weight_name=w, adapter_name=a, local_files_only=True, low_cpu_mem_usage=True)
-                self.log(f"Added LoRA (scale={v}): {k}")
-
-            target.set_adapters(names, list(loras.values()))
-            loaded_adapters = target.active_adapters()
-            self.log(f'Total loaded LoRAs: {len(loaded_adapters)}')
-            self.log(f'Adapters: {str(loaded_adapters)}')
-            if len(names) > 0:  self.adapter_names = names
-            else:               self.adapter_names = None
-        return
-
-
-    def load_ip_adapter(self, ip_adapter):
-        kwargs = {}
-        split = ip_adapter.split("/")
-
-        ip_adapter_file = split[-1]
-        kwargs["weight_name"] = ip_adapter_file
-
-        ip_adapter_subfolder = split[-2]
-        kwargs["subfolder"] = ip_adapter_subfolder
-
-        ip_adapter_folder = ip_adapter.replace(f'/{ip_adapter_subfolder}/{ip_adapter_file}', "")
-
-        if "vit-h" in ip_adapter_file.lower():
-            kwargs["image_encoder_folder"] = ip_adapter.replace(f'/{ip_adapter_subfolder}/{ip_adapter_file}', "/models/image_encoder")
-
-        self.pipe.load_ip_adapter(
-            ip_adapter_folder,
-            use_safetensors=False, # NOTE: safetensors off
-            local_files_only=True,
-            low_cpu_mem_usage=True,
-            **kwargs
-        )
         return
 
 
@@ -497,13 +429,20 @@ class CommonHost:
 
                 # dynamo tweaks
                 if torch_config is not None:
-                    setup_torch_dynamo(torch_config)
+                    cache_size_limit                = torch_config.get("torch_cache_limit")
+                    accumulated_cache_size_limit    = torch_config.get("torch_accumlated_cache_limit")
+                    capture_scalar_outputs          = torch_config.get("torch_capture_scalar")
+                    if cache_size_limit is not None:                torch._dynamo.config.cache_size_limit               = cache_size_limit
+                    if accumulated_cache_size_limit is not None:    torch._dynamo.config.accumulated_cache_size_limit   = accumulated_cache_size_limit
+                    if capture_scalar_outputs is not None:          torch._dynamo.config.capture_scalar_outputs         = capture_scalar_outputs
+                    #torch._dynamo.config.suppress_errors           = True
 
                 # torch tweaks
-                setup_torch_backends()
+                #torch.backends.cuda.enable_mem_efficient_sdp(False)
+                #torch.backends.cuda.enable_flash_sdp(False)
 
                 # update globals
-                self.vae_dtype      = torch.float32 if (vae_fp16 is not None or vae_fp16 == False) else torch.float16
+                self.vae_dtype      = torch.float16 if vae_fp16 is not None and vae_fp16 == True else None
                 self.torch_dtype    = get_torch_type(variant)
 
                 kwargs = {}
@@ -601,7 +540,27 @@ class CommonHost:
 
                 # set ipadapter
                 if ip_adapter is not None:
-                    self.load_ip_adapter(ip_adapter)
+                    kwargs = {}
+                    split = ip_adapter.split("/")
+
+                    ip_adapter_file = split[-1]
+                    kwargs["weight_name"] = ip_adapter_file
+
+                    ip_adapter_subfolder = split[-2]
+                    kwargs["subfolder"] = ip_adapter_subfolder
+
+                    ip_adapter_folder = ip_adapter.replace(f'/{ip_adapter_subfolder}/{ip_adapter_file}', "")
+
+                    if "vit-h" in ip_adapter_file.lower():
+                        kwargs["image_encoder_folder"] = ip_adapter.replace(f'/{ip_adapter_subfolder}/{ip_adapter_file}', "/models/image_encoder")
+
+                    self.pipe.load_ip_adapter(
+                        ip_adapter_folder,
+                        use_safetensors=False, # NOTE: safetensors off
+                        local_files_only=True,
+                        low_cpu_mem_usage=True,
+                        **kwargs
+                    )
 
                 # set memory saving
                 if self.pipeline_type not in ["svd"]:
@@ -613,21 +572,118 @@ class CommonHost:
                         else:                                               self.log("xformers not supported for this pipeline - ignoring")
 
                 # group offloading
-                if group_offload_config is not None and backend_name not in ["balanced"]:
-                    self.do_offloading(group_offload_config)
+                if group_offload_config is None:
+                    pass
                 else:
-                    self.log("Group offloading not supported for this backend - ignoring")
+                    if backend_name in ["balanced"]:
+                        self.log("Group offloading not supported for this backend - ignoring")
+                    else:
+                        transformer_offload_config = group_offload_config.get("transformer")
+                        encoder_offload_config = group_offload_config.get("encoder")
+                        vae_offload_config = group_offload_config.get("vae")
+                        # TODO: misc_offload_config = group_offload_config.get("misc")
+                        kwargs = {"onload_device": torch.device(f"cuda:{self.local_rank}")}
+
+                        if transformer_offload_config is not None:
+                            kwargs["offload_device"] = transformer_offload_config.get("offload_device")
+                            kwargs["offload_type"] = transformer_offload_config.get("offload_type")
+                            if kwargs["offload_type"] == "block_level":
+                                kwargs["num_blocks_per_group"] = transformer_offload_config.get("num_blocks_per_group")
+                            if transformer_offload_config.get("use_stream") == True:
+                                kwargs["use_stream"] = True
+
+                            if hasattr(self.pipe, "transformer"):
+                                self.pipe.transformer.enable_group_offload(**kwargs)
+                            elif hasattr(self.pipe, "unet"):
+                                self.pipe.unet.enable_group_offload(**kwargs)
+
+                        if encoder_offload_config is not None:
+                            kwargs["offload_device"] = encoder_offload_config.get("offload_device")
+                            kwargs["offload_type"] = encoder_offload_config.get("offload_type")
+                            if kwargs["offload_type"] == "block_level":
+                                kwargs["num_blocks_per_group"] = encoder_offload_config.get("num_blocks_per_group")
+                            if encoder_offload_config.get("use_stream") == True:
+                                kwargs["use_stream"] = True
+                            if hasattr(self.pipe, "text_encoder") and self.pipe.text_encoder is not None:
+                                apply_group_offloading(self.pipe.text_encoder, **kwargs)
+                            if hasattr(self.pipe, "text_encoder_2") and self.pipe.text_encoder_2 is not None:
+                                apply_group_offloading(self.pipe.text_encoder_2, **kwargs)
+                            if hasattr(self.pipe, "text_encoder_3") and self.pipe.text_encoder_3 is not None:
+                                apply_group_offloading(self.pipe.text_encoder_3, **kwargs)
+                            if hasattr(self.pipe, "image_encoder") and self.pipe.image_encoder is not None:
+                                apply_group_offloading(self.pipe.image_encoder, **kwargs)
+
+                        if vae_offload_config is not None:
+                            kwargs["offload_device"] = vae_offload_config.get("offload_device")
+                            kwargs["offload_type"] = vae_offload_config.get("offload_type")
+                            if kwargs["offload_type"] == "block_level":
+                                kwargs["num_blocks_per_group"] = vae_offload_config.get("num_blocks_per_group")
+                            if vae_offload_config.get("use_stream") == True:
+                                kwargs["use_stream"] = True
+
+                            if hasattr(self.pipe, "vae"):
+                                self.pipe.vae.enable_group_offload(**kwargs)
 
                 # set lora
                 if lora is not None:
-                    self.load_lora(lora)
+                    target = None
+                    if self.pipeline_type in ["sd1", "sd2", "sdxl"]:
+                        target = self.pipe.unet
+                    elif self.pipeline_type in ["sd3", "zimage"]:
+                        target = self.pipe.transformer
+
+                    if target is not None:
+                        names = []
+                        for k, v in lora.items():
+                            self.log(f"loading lora: {k}")
+                            if k.endswith(".safetensors") or k.endswith(".sft"):    weights = safetensors.torch.load_file(k, device=f'cuda:{self.local_rank}')
+                            else:                                                   weights = torch.load(k, map_location=torch.device(f'cuda:{self.local_rank}'))
+                            # for k2,v2 in weights.items():                           weights[k2] = v2.to(device=target.device, dtype=target.dtype)
+                            w = k.split("/")[-1]
+                            a = w if not "." in w else w.split(".")[0]
+                            names.append(a)
+                            self.pipe.load_lora_weights(weights, weight_name=w, adapter_name=a, local_files_only=True, low_cpu_mem_usage=True)
+                            self.log(f"Added LoRA (scale={v}): {k}")
+
+                        target.set_adapters(names, list(lora.values()))
+                        loaded_adapters = target.active_adapters()
+                        self.log(f'Total loaded LoRAs: {len(loaded_adapters)}')
+                        self.log(f'Adapters: {str(loaded_adapters)}')
+                        if len(names) > 0:  self.adapter_names = names
+                        else:               self.adapter_names = None
 
                 # set models to eval mode
-                self.setup_evals()
+                for k, v in self.pipe.components.items():
+                    try: v.eval()
+                    except: pass
 
                 # compiles
                 if compile_config is not None:
-                    self.setup_compiles(compile_config)
+                    compile_transformer     = compile_config.get("compile_transformer")
+                    compile_vae             = compile_config.get("compile_vae")
+                    compile_encoder         = compile_config.get("compile_encoder")
+                    compile_backend         = compile_config.get("compile_backend")
+                    compile_mode            = compile_config.get("compile_mode")
+                    compile_options         = compile_config.get("compile_options")
+                    compile_fullgraph_off   = compile_config.get("compile_fullgraph_off")
+
+                    if compile_mode is not None and compile_options is not None:
+                        self.log("Compile mode and options are both defined, will ignore compile mode.")
+                        compile_mode = None
+                    compiler_config                             = {}
+                    compiler_config["fullgraph"]                = (compile_fullgraph_off is None or compile_fullgraph_off == False)
+                    compiler_config["dynamic"]                  = False
+                    if compile_backend is not None:             compiler_config["backend"] = compile_backend
+                    if compile_mode is not None:                compiler_config["mode"] = compile_mode
+                    if compile_options is not None:             compiler_config["options"] = json.loads(compile_options)
+
+                    if compile_transformer:
+                        if self.pipeline_type in ["flux", "sd3", "wani2v", "want2v", "zimage"]:
+                            self.compile_helper("transformer", compiler_config)
+                        else:
+                            self.compile_helper("unet", compiler_config)
+                    if compile_vae:                             self.compile_helper("vae", compiler_config)
+                    if compile_encoder:                         self.compile_helper("encoder", compiler_config)
 
                 # clean up
                 clean()
@@ -673,7 +729,8 @@ class CommonHost:
 
         match model_type:
             case "AutoencoderKL":
-                kwargs["torch_dtype"] = self.vae_dtype
+                if self.vae_dtype is not None:
+                    kwargs["torch_dtype"] = self.vae_dtype
                 if is_checkpoint:   return AutoencoderKL.from_pretrained(model_path, **kwargs)
                 else:               return AutoencoderKL.from_single_file(model_path, **kwargs)
             case "ControlNetModel":
@@ -736,90 +793,6 @@ class CommonHost:
                 return UMT5EncoderModel.from_pretrained(model_path, **kwargs)
             case _:
                 return AutoModelT.from_pretrained(model_path, **kwargs)
-
-
-    def setup_evals(self):
-        for k, v in self.pipe.components.items():
-            try: v.eval()
-            except: pass
-        return
-
-
-    def do_offloading(self, group_offload_config):
-        transformer_offload_config = group_offload_config.get("transformer")
-        encoder_offload_config = group_offload_config.get("encoder")
-        vae_offload_config = group_offload_config.get("vae")
-        # TODO: misc_offload_config = group_offload_config.get("misc")
-        kwargs = {"onload_device": torch.device(f"cuda:{self.local_rank}")}
-
-        if transformer_offload_config is not None:
-            kwargs["offload_device"] = transformer_offload_config.get("offload_device")
-            kwargs["offload_type"] = transformer_offload_config.get("offload_type")
-            if kwargs["offload_type"] == "block_level":
-                kwargs["num_blocks_per_group"] = transformer_offload_config.get("num_blocks_per_group")
-            if transformer_offload_config.get("use_stream") == True:
-                kwargs["use_stream"] = True
-
-            if hasattr(self.pipe, "transformer"):
-                self.pipe.transformer.enable_group_offload(**kwargs)
-            elif hasattr(self.pipe, "unet"):
-                self.pipe.unet.enable_group_offload(**kwargs)
-
-        if encoder_offload_config is not None:
-            kwargs["offload_device"] = encoder_offload_config.get("offload_device")
-            kwargs["offload_type"] = encoder_offload_config.get("offload_type")
-            if kwargs["offload_type"] == "block_level":
-                kwargs["num_blocks_per_group"] = encoder_offload_config.get("num_blocks_per_group")
-            if encoder_offload_config.get("use_stream") == True:
-                kwargs["use_stream"] = True
-            if hasattr(self.pipe, "text_encoder") and self.pipe.text_encoder is not None:
-                apply_group_offloading(self.pipe.text_encoder, **kwargs)
-            if hasattr(self.pipe, "text_encoder_2") and self.pipe.text_encoder_2 is not None:
-                apply_group_offloading(self.pipe.text_encoder_2, **kwargs)
-            if hasattr(self.pipe, "text_encoder_3") and self.pipe.text_encoder_3 is not None:
-                apply_group_offloading(self.pipe.text_encoder_3, **kwargs)
-            if hasattr(self.pipe, "image_encoder") and self.pipe.image_encoder is not None:
-                apply_group_offloading(self.pipe.image_encoder, **kwargs)
-
-        if vae_offload_config is not None:
-            kwargs["offload_device"] = vae_offload_config.get("offload_device")
-            kwargs["offload_type"] = vae_offload_config.get("offload_type")
-            if kwargs["offload_type"] == "block_level":
-                kwargs["num_blocks_per_group"] = vae_offload_config.get("num_blocks_per_group")
-            if vae_offload_config.get("use_stream") == True:
-                kwargs["use_stream"] = True
-
-            if hasattr(self.pipe, "vae"):
-                self.pipe.vae.enable_group_offload(**kwargs)
-
-
-    def setup_compiles(self, compile_config):
-        compile_transformer     = compile_config.get("compile_transformer")
-        compile_vae             = compile_config.get("compile_vae")
-        compile_encoder         = compile_config.get("compile_encoder")
-        compile_backend         = compile_config.get("compile_backend")
-        compile_mode            = compile_config.get("compile_mode")
-        compile_options         = compile_config.get("compile_options")
-        compile_fullgraph_off   = compile_config.get("compile_fullgraph_off")
-
-        if compile_mode is not None and compile_options is not None:
-            self.log("Compile mode and options are both defined, will ignore compile mode.")
-            compile_mode = None
-        compiler_config                             = {}
-        compiler_config["fullgraph"]                = (compile_fullgraph_off is None or compile_fullgraph_off == False)
-        compiler_config["dynamic"]                  = False
-        if compile_backend is not None:             compiler_config["backend"] = compile_backend
-        if compile_mode is not None:                compiler_config["mode"] = compile_mode
-        if compile_options is not None:             compiler_config["options"] = json.loads(compile_options)
-
-        if compile_transformer:
-            if self.pipeline_type in ["flux", "sd3", "wani2v", "want2v", "zimage"]:
-                self.compile_helper("transformer", compiler_config)
-            else:
-                self.compile_helper("unet", compiler_config)
-        if compile_vae:                             self.compile_helper("vae", compiler_config)
-        if compile_encoder:                         self.compile_helper("encoder", compiler_config)
-        return
 
 
     def compile_helper(self, target, compile_config):
@@ -972,7 +945,10 @@ class CommonHost:
             global get_scheduler_progressbar_offset_index
             nonlocal self, data
             the_index = get_scheduler_progressbar_offset_index(pipe.scheduler, index)
-            self.log(str(callback_kwargs["latents"]), rank_0_only=True)
+            # self.log(str(callback_kwargs["latents"]), rank_0_only=True)
+            if torch.any(callback_kwargs["latents"].isnan()):
+                self.log("NaN detected in latents - stopping generation")
+                self.pipe._interrupt = True
             self.progress = int(the_index / data["steps"] * 100)
             return callback_kwargs
 
@@ -1112,18 +1088,20 @@ class CommonHost:
 
 
     def process_latent_for_output(self, latents, is_latent_output):
-        default_vae_dtype = self.pipe.vae.dtype
         latents = add_alpha_to_latent(latents)
 
         if is_latent_output:
             return latents
 
-        self.pipe.vae = self.pipe.vae.to(dtype=self.vae_dtype)
-        latents = latents.to(dtype=self.vae_dtype)
+        if self.vae_dtype is not None:
+            default_vae_dtype = self.pipe.vae.dtype
+            self.pipe.vae = self.pipe.vae.to(dtype=self.vae_dtype)
+        latents = latents.to(dtype=self.pipe.vae.dtype)
         latents = latents / self.pipe.vae.config.scaling_factor
         latents = self.pipe.vae.decode(latents, return_dict=False)[0]
         latents = self.pipe.image_processor.postprocess(latents, output_type="pil")
-        self.pipe.vae = self.pipe.vae.to(dtype=default_vae_dtype)
+        if self.vae_dtype is not None:
+            self.pipe.vae = self.pipe.vae.to(dtype=default_vae_dtype)
         return latents
 
 

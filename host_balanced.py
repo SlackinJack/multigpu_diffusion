@@ -1,31 +1,8 @@
 import argparse
-import base64
-import copy
-import json
 import os
+import signal
 import torch
-import traceback
-from diffusers import (
-    AnimateDiffControlNetPipeline,
-    AnimateDiffPipeline,
-    FluxControlNetPipeline,
-    FluxPipeline,
-    StableDiffusion3ControlNetPipeline,
-    StableDiffusion3Pipeline,
-    StableDiffusionControlNetPipeline,
-    StableDiffusionPipeline,
-    StableDiffusionUpscalePipeline,
-    StableDiffusionXLControlNetPipeline,
-    StableDiffusionXLPipeline,
-    StableVideoDiffusionPipeline,
-    WanPipeline,
-    WanImageToVideoPipeline,
-    ZImagePipeline,
-    # ZImageControlNetPipeline,
-)
-from diffusers.utils import load_image
 from flask import Flask, request, jsonify
-from PIL import Image
 
 
 from modules.host_common import *
@@ -68,7 +45,7 @@ def handle_path(path):
         case "initialize":
             return base.get_initialized_flask()
         case "applied":
-            return __get_applied()
+            return base.get_applied()
         case "progress":
             return base.get_progress_flask()
 
@@ -81,6 +58,8 @@ def handle_path(path):
             return __offload_modules_parallel()
         case "close":
             base.log("Received exit signal, shutting down")
+            base.close_pipeline()
+            os.kill(os.getpid(), signal.SIGTERM)
             raise HostShutdown
 
         case _:
@@ -88,12 +67,7 @@ def handle_path(path):
 
 
 def __offload_modules_parallel():
-    return "Operation not supported", 500
-
-
-def __get_applied():
-    global base
-    return str(base.applied), 200
+    return "Operation not supported by this host", 500
 
 
 def __apply_pipeline_parallel(data):
@@ -105,7 +79,6 @@ def __apply_pipeline_parallel(data):
 def __generate_image_parallel(data):
     global base
 
-    if base.applied is None: __close_pipeline()
     data = base.prepare_inputs(data)
 
     with torch.no_grad():

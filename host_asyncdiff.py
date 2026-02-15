@@ -1,35 +1,11 @@
 import argparse
-import base64
-import copy
-import json
 import os
-import sys
+import signal
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
-import traceback
 from datetime import timedelta
-from diffusers import (
-    AnimateDiffControlNetPipeline,
-    AnimateDiffPipeline,
-    FluxControlNetPipeline,
-    FluxPipeline,
-    StableDiffusion3ControlNetPipeline,
-    StableDiffusion3Pipeline,
-    StableDiffusionControlNetPipeline,
-    StableDiffusionPipeline,
-    StableDiffusionUpscalePipeline,
-    StableDiffusionXLControlNetPipeline,
-    StableDiffusionXLPipeline,
-    StableVideoDiffusionPipeline,
-    WanPipeline,
-    WanImageToVideoPipeline,
-    ZImagePipeline,
-    # ZImageControlNetPipeline,
-)
-from diffusers.utils import load_image
 from flask import Flask, request, jsonify
-from PIL import Image
 
 
 from AsyncDiff.asyncdiff.async_animate import AsyncDiff as AsyncDiffAnimateDiff
@@ -101,7 +77,7 @@ def handle_path(path):
         case "initialize":
             return base.get_initialized_flask()
         case "applied":
-            return __get_applied()
+            return base.get_applied()
         case "progress":
             return base.get_progress_flask()
 
@@ -114,7 +90,9 @@ def handle_path(path):
             return __offload_modules()
         case "close":
             base.log("Received exit signal, shutting down")
-            __close_pipeline()
+            dist.broadcast_object_list([{"stop": True}], src=0)
+            base.close_pipeline()
+            os.kill(os.getpid(), signal.SIGTERM)
             raise HostShutdown
 
         case _:
@@ -125,6 +103,8 @@ asyncdiff_config = None
 def __reset_asyncdiff(steps):
     global asyncdiff_config
     if asyncdiff_config.get("synced_percent") is not None and asyncdiff_config.get("synced_percent") > 0:
+        if asyncdiff_config.get("synced_steps") is not None and asyncdiff_config.get("synced_steps") > 0:
+            base.log("Received both synced_percent and synced_steps - synced_percentage takes precendent")
         __reset_asyncdiff_sync_state((steps * asyncdiff_config.get("synced_percent")) // 100)
     else:
         __reset_asyncdiff_sync_state(asyncdiff_config.get("synced_steps"))
@@ -160,11 +140,6 @@ def __generate_image(data):
     return jsonify(response)
 
 
-def __close_pipeline():
-    dist.broadcast_object_list([{"stop": True}], src=0)
-    return
-
-
 def __offload_modules():
     dist.broadcast_object_list([{"offload": True}], src=0)
     return __offload_modules_parallel()
@@ -177,10 +152,12 @@ def __offload_modules_parallel():
 def __move_pipe_module(module, device):
     global base
     try:
-        if vars(base.pipe)[module].device != torch.device(device=device):
-            vars(base.pipe)[module] = vars(base.pipe)[module].to(device=device)
-            if "cpu" in device:
-                vars(base.pipe)[module] = vars(base.pipe)[module].cpu()
+        mod = vars(base.pipe)[module]
+        cur_device = mod.device
+        tar_device = torch.device(device)
+        if cur_device != tar_device:
+            vars(base.pipe)[module] = mod.to(device=device)
+            if "cpu" in device: vars(base.pipe)[module] = mod.cpu()
             return 0
         else:
             return -1
@@ -230,10 +207,6 @@ def __move_pipe(device):
     return msg, 200
 
 
-def __get_applied():
-    global base
-    return str(base.applied), 200
-
 def __apply_pipeline_parallel(data):
     global async_diff, asyncdiff_config, base
     with torch.no_grad():
@@ -269,7 +242,6 @@ def __apply_pipeline_parallel(data):
 def __generate_image_parallel(data):
     global base
 
-    if base.applied is None: __close_pipeline()
     data = base.prepare_inputs(data)
 
     with torch.no_grad():
