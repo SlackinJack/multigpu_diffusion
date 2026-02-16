@@ -1,4 +1,5 @@
 import argparse
+import logging
 import os
 import signal
 import torch
@@ -32,7 +33,9 @@ def __run_host():
     for e in GENERIC_HOST_ARGS_TOGGLES:     parser.add_argument(f"--{e}", action="store_true")
     args = parser.parse_args()
 
-    base.log("Starting Flask host")
+    torch._logging.set_logs(all=logging.CRITICAL)
+    base.log("ℹ️ Starting Flask host")
+    logging.getLogger('werkzeug').disabled = True
     app.run(host="localhost", port=args.port)
     return
 
@@ -57,7 +60,7 @@ def handle_path(path):
         case "offload":
             return __offload_modules_parallel()
         case "close":
-            base.log("Received exit signal, shutting down")
+            base.log("🛑 Received exit signal - shutting down")
             base.close_pipeline()
             os.kill(os.getpid(), signal.SIGTERM)
             raise HostShutdown
@@ -85,14 +88,8 @@ def __generate_image_parallel(data):
         torch.cuda.reset_peak_memory_stats()
         base.progress = 0
 
-        # set scheduler
-        if data["scheduler"] is not None:           base.set_scheduler(data["scheduler"])
-        elif base.default_scheduler is not None:    base.pipe.scheduler = base.default_scheduler
-        if data["latent"] is not None:              data["latent"] = base.process_input_latent(data["latent"])
-        base.set_scheduler_timesteps(data["denoising_start"])
-
         # inference kwargs
-        kwargs = base.get_inference_kwargs(data, can_use_compel=False)
+        kwargs = base.setup_inference(data, can_use_compel=False)
 
         # inference
         output = base.pipe(**kwargs)

@@ -20,14 +20,6 @@ def pickle_and_encode_b64(obj):
     return out
 
 
-def get_torch_dtype_from_type(t):
-    match t:
-        case "bf16":    torch_dtype = torch.bfloat16
-        case "fp16":    torch_dtype = torch.float16
-        case _:         torch_dtype = torch.float32
-    return torch_dtype
-
-
 def convert_b64_to_nhwc_tensor(b64):
     if b64 is None: return None
     im2 = decode_b64_and_unpickle(b64)

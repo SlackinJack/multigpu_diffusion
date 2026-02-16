@@ -1,4 +1,5 @@
 import argparse
+import logging
 import os
 import signal
 import torch
@@ -54,18 +55,21 @@ def __run_host():
     for e in GENERIC_HOST_ARGS_TOGGLES:     parser.add_argument(f"--{e}", action="store_true")
     args = parser.parse_args()
 
+    torch._logging.set_logs(all=logging.CRITICAL)
     if base.local_rank == 0:
-        base.log("Starting Flask host on rank 0", rank_0_only=True)
+        base.log("ℹ️ Starting Flask host on rank 0", rank_0_only=True)
+        logging.getLogger('werkzeug').disabled = True
         app.run(host="localhost", port=args.port)
     else:
+        # TODO: would be nice to make this non-blocking
         while True:
-            base.log(f"waiting for tasks")
+            base.log(f"⏳ Waiting for tasks")
             params = [{"stop": True}]
             dist.broadcast_object_list(params, src=0)
             if params[0].get("stop") is not None:
-                base.log("Received exit signal, shutting down")
+                base.log("🛑 Received exit signal - shutting down")
                 return
-            base.log(f"Received task")
+            base.log(f"📋 Received task")
             __handle_request_parallel(*params)
     return
 
@@ -89,7 +93,7 @@ def handle_path(path):
         case "offload":
             return __offload_modules()
         case "close":
-            base.log("Received exit signal, shutting down")
+            base.log("🛑 Received exit signal - shutting down")
             dist.broadcast_object_list([{"stop": True}], src=0)
             base.close_pipeline()
             os.kill(os.getpid(), signal.SIGTERM)
@@ -104,11 +108,12 @@ def __reset_asyncdiff(steps):
     global asyncdiff_config
     if asyncdiff_config.get("synced_percent") is not None and asyncdiff_config.get("synced_percent") > 0:
         if asyncdiff_config.get("synced_steps") is not None and asyncdiff_config.get("synced_steps") > 0:
-            base.log("Received both synced_percent and synced_steps - synced_percentage takes precendent")
-        __reset_asyncdiff_sync_state((steps * asyncdiff_config.get("synced_percent")) // 100)
+            base.log("ℹ️ Received both synced_percent and synced_steps - synced_percentage takes precendent")
+        warmup_steps = (steps * asyncdiff_config.get("synced_percent")) // 100
     else:
-        __reset_asyncdiff_sync_state(asyncdiff_config.get("synced_steps"))
-    return
+        warmup_steps = asyncdiff_config.get("synced_steps")
+    __reset_asyncdiff_sync_state(warmup_steps)
+    return warmup_steps
 
 
 def __reset_asyncdiff_sync_state(synced_steps):
@@ -202,8 +207,12 @@ def __move_pipe(device):
 
     clean()
     dist.barrier()
-    msg = f"Moved to {device}: {str(moved)}, Not moved to {device}: {str(not_moved)}, Already on {device}: {str(alr_moved)}"
-    base.log(msg)
+    if ":" in device: device = device.split(":")[0]
+    msg = f"""ℹ️ Moved pipeline components:
+    Moved to {device}: {str(moved)}
+    Not moved to {device}: {str(not_moved)}
+    Already on {device}: {str(alr_moved)}"""
+    base.log(msg, rank_0_only=True)
     return msg, 200
 
 
@@ -212,8 +221,6 @@ def __apply_pipeline_parallel(data):
     with torch.no_grad():
         result = base.setup_pipeline(data, backend_name="asyncdiff")
         if result[1] == 200:
-            # set asyncdiff
-            # asyncdiff
             ad_config = data.get("backend_config")
             assert ad_config is not None, "AsyncDiff configuration must be provided"
             asyncdiff_config = ad_config
@@ -247,17 +254,11 @@ def __generate_image_parallel(data):
     with torch.no_grad():
         __move_pipe(f"cuda:{dist.get_rank()}")
         torch.cuda.reset_peak_memory_stats()
-        __reset_asyncdiff(data["steps"])
+        warmup_steps = __reset_asyncdiff(data["steps"])
         base.progress = 0
 
-        # set scheduler
-        if data["scheduler"] is not None:           base.set_scheduler(data["scheduler"])
-        elif base.default_scheduler is not None:    base.pipe.scheduler = base.default_scheduler
-        if data["latent"] is not None:              data["latent"] = base.process_input_latent(data["latent"])
-        base.set_scheduler_timesteps(data["denoising_start"])
-
         # inference kwargs
-        kwargs = base.get_inference_kwargs(data, can_use_compel=True)
+        kwargs = base.setup_inference(data, backend_name="AsyncDiff", can_use_compel=True, speedup_step=warmup_steps)
 
         # inference
         dist.barrier()

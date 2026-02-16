@@ -1,6 +1,6 @@
 # multigpu_diffusion
 
-Python Flask hosts for distributed parallel Diffusion inferencing solutions.
+Python Flask hosts for multi-GPU Diffusion inferencing solutions.
 
 
 ## Usage:
