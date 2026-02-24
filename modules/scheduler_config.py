@@ -52,7 +52,7 @@ def get_scheduler_class(scheduler_name):
 
         case "ipndm":           return IPNDMScheduler
 
-        # zimage
+        # flowmatch
         case "fm_euler":        return FlowMatchEulerDiscreteScheduler
 
         case _:                 raise NotImplementedError
@@ -80,7 +80,7 @@ def get_scheduler_name(scheduler):
 
         case "IPNDMScheduler":                  return "ipndm"
 
-        # zimage
+        # flowmatch
         case "FlowMatchEulerDiscreteScheduler": return "fm_euler"
 
         case _:                                 return None

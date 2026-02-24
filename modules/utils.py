@@ -1,4 +1,5 @@
 import base64
+import json
 import pickle
 import torch
 
@@ -42,3 +43,18 @@ def convert_tensor_to_b64(tensor):
     im = ToPILImage()(im)
     b64_image = pickle_and_encode_b64(im)
     return b64_image
+
+
+def format_json(str_or_dict_in, indent=4, indent_all=False):
+    if isinstance(str_or_dict_in, dict): str_or_dict_in = json.dumps(str_or_dict_in)
+    d = json.loads(str_or_dict_in)
+    d = json.dumps(d, indent=indent)
+    if indent_all == True:
+        d2 = d.split("\n")
+        out = ""
+        for d3 in d2:
+            if len(out) != 0:
+                out += " "*indent
+            out += d3 + "\n"
+        d = out[::-1].replace("\n","",1)[::-1]
+    return d

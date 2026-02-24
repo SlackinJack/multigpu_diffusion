@@ -9,3 +9,8 @@ Python Flask hosts for multi-GPU Diffusion inferencing solutions.
 
 ## Additional Resources:
 - [AsyncDiff](https://github.com/czg1225/AsyncDiff)
+
+
+## Test Environment:
+- 2x Intel Xeon E5-2696v4
+- 4x Nvidia Tesla T4

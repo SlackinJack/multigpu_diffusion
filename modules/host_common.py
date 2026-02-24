@@ -79,7 +79,14 @@ COMPEL_SUPPORTED_MODELS = ["sd1", "sd2", "sdxl"]
 
 
 from modules.scheduler_config import *
-from modules.utils import *
+from modules.utils import (
+    decode_b64_and_unpickle,
+    pickle_and_encode_b64,
+    convert_b64_to_nhwc_tensor,
+    convert_image_to_hwc_tensor,
+    convert_tensor_to_b64,
+    format_json
+)
 
 
 class HostShutdown(Exception): pass
@@ -103,7 +110,7 @@ def _get_encoder_module_names():
 
 
 def _get_misc_module_names():
-    return ["controlnet", "motion_adapter", "image_processor"]
+    return ["controlnet", "motion_adapter", "image_processor", "feature_extractor"]
 
 
 def _get_vae_module_names():
@@ -348,7 +355,7 @@ class CommonHost:
             return None
 
         kwargs = []
-        kwargs["dtype"] = torch_dtype
+        kwargs["torch_dtype"] = torch_dtype
         kwargs["use_safetensors"] = True
         kwargs["local_files_only"] = True
         kwargs["low_cpu_mem_usage"] = True
@@ -431,15 +438,19 @@ class CommonHost:
                     #torch._dynamo.config.suppress_errors           = True
 
                 # torch tweaks
-                #torch.backends.cuda.enable_mem_efficient_sdp(False)
-                #torch.backends.cuda.enable_flash_sdp(False)
+                torch.backends.cuda.sdp_kernel(enable_flash=True, enable_math=True, enable_mem_efficient=True, enable_cudnn=True)
+                # ensure deterministic
+                torch.use_deterministic_algorithms(True, warn_only=True)
+                torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = False
+                torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = False
+                torch.backends.cuda.allow_fp16_bf16_reduction_math_sdp(False)
 
                 # update globals
                 self.vae_dtype      = torch.float16 if vae_fp16 is not None and vae_fp16 == True else None
                 self.torch_dtype    = get_torch_type(variant)
 
                 kwargs = {}
-                kwargs["dtype"] = self.torch_dtype
+                kwargs["torch_dtype"] = self.torch_dtype
                 kwargs["use_safetensors"] = True
                 kwargs["local_files_only"] = True
                 kwargs["low_cpu_mem_usage"] = True
@@ -452,11 +463,6 @@ class CommonHost:
                 if quantization_config is not None:
                     kwargs["quantization_config"] = get_quantization_config(quantization_config)
 
-                # set control net
-                controlnet_model = None
-                if control_net is not None and self.pipeline_type not in ["sdup", "svd"]:
-                    kwargs["controlnet"] = self.load_model(control_net, "ControlNetModel")
-
                 # set transformer
                 if transformer is not None:
                     match self.pipeline_type:
@@ -464,10 +470,12 @@ class CommonHost:
                         case "sd3":     kwargs["transformer"] = self.load_model(transformer, "SD3Transformer2DModel")
                         case "zimage":  kwargs["transformer"] = self.load_model(transformer, "ZImageTransformer2DModel")
                         case _:         kwargs["unet"] = self.load_model(transformer, "UNet2DConditionModel")
+                self.progress = 10
 
                 # set vae
                 if vae is not None and self.pipeline_type not in ["ad", "svd"]:
                     kwargs["vae"] = self.load_model(vae, "AutoencoderKL")
+                self.progress = 20
 
                 # set text encoder(s)
                 if text_encoder is not None or text_encoder_2 is not None or text_encoder_3 is not None:
@@ -484,6 +492,12 @@ class CommonHost:
                     if text_encoder_3 is not None:
                         # kwargs["text_encoder_3"] = self.load_encoder(text_encoder_3, ???)
                         pass
+                self.progress = 30
+
+                # set control net
+                controlnet_model = None
+                if control_net is not None and self.pipeline_type not in ["sdup", "svd"]:
+                    kwargs["controlnet"] = self.load_model(control_net, "ControlNetModel")
 
                 # set motion_adapter
                 if (motion_module is not None or motion_adapter is not None) and self.pipeline_type in ["ad"]:
@@ -491,6 +505,7 @@ class CommonHost:
                         kwargs["motion_adapter"] = self.load_model(motion_module, "MotionAdapter")
                     else:
                         kwargs["motion_adapter"] = self.load_model(motion_adapter, "MotionAdapter")
+                self.progress = 40
 
                 # setup pipeline
                 match self.pipeline_type:
@@ -554,6 +569,7 @@ class CommonHost:
                         low_cpu_mem_usage=True,
                         **kwargs
                     )
+                self.progress = 60
 
                 # set memory saving
                 if self.pipeline_type not in ["svd"]:
@@ -563,6 +579,7 @@ class CommonHost:
                     if xformers_efficient:
                         if self.pipeline_type not in ["flux", "zimage"]:    self.pipe.enable_xformers_memory_efficient_attention()  # NOTE: blocked because causes tensor size mismatches
                         else:                                               self.log("xformers not supported for this pipeline - ignoring")
+                self.progress = 70
 
                 # group offloading
                 if group_offload_config is None:
@@ -590,12 +607,6 @@ class CommonHost:
                                     module = getattr(self.pipe, name)
                                     if module is not None:
                                         module.enable_group_offload(**kwargs)
-                            """
-                            if hasattr(self.pipe, "transformer"):
-                                self.pipe.transformer.enable_group_offload(**kwargs)
-                            elif hasattr(self.pipe, "unet"):
-                                self.pipe.unet.enable_group_offload(**kwargs)
-                            """
 
                         if encoder_offload_config is not None:
                             kwargs["offload_device"] = encoder_offload_config.get("offload_device")
@@ -604,16 +615,6 @@ class CommonHost:
                                 kwargs["num_blocks_per_group"] = encoder_offload_config.get("num_blocks_per_group")
                             if encoder_offload_config.get("use_stream") == True:
                                 kwargs["use_stream"] = True
-                            """
-                            if hasattr(self.pipe, "text_encoder") and self.pipe.text_encoder is not None:
-                                apply_group_offloading(self.pipe.text_encoder, **kwargs)
-                            if hasattr(self.pipe, "text_encoder_2") and self.pipe.text_encoder_2 is not None:
-                                apply_group_offloading(self.pipe.text_encoder_2, **kwargs)
-                            if hasattr(self.pipe, "text_encoder_3") and self.pipe.text_encoder_3 is not None:
-                                apply_group_offloading(self.pipe.text_encoder_3, **kwargs)
-                            if hasattr(self.pipe, "image_encoder") and self.pipe.image_encoder is not None:
-                                apply_group_offloading(self.pipe.image_encoder, **kwargs)
-                            """
                             for name in _get_encoder_module_names():
                                 if hasattr(self.pipe, name):
                                     module = getattr(self.pipe, name)
@@ -627,10 +628,6 @@ class CommonHost:
                                 kwargs["num_blocks_per_group"] = vae_offload_config.get("num_blocks_per_group")
                             if vae_offload_config.get("use_stream") == True:
                                 kwargs["use_stream"] = True
-                            """
-                            if hasattr(self.pipe, "vae"):
-                                self.pipe.vae.enable_group_offload(**kwargs)
-                            """
                             for name in _get_vae_module_names():
                                 if hasattr(self.pipe, name):
                                     module = getattr(self.pipe, name)
@@ -644,19 +641,13 @@ class CommonHost:
                                 kwargs["num_blocks_per_group"] = misc_offload_config.get("num_blocks_per_group")
                             if misc_offload_config.get("use_stream") == True:
                                 kwargs["use_stream"] = True
-                            """
-                            if hasattr(self.pipe, "controlnet"):
-                                self.pipe.controlnet.enable_group_offload(**kwargs)
-                            if hasattr(self.pipe, "motion_adapter"):
-                                self.pipe.motion_adapter.enable_group_offload(**kwargs)
-                            if hasattr(self.pipe, "image_processor"):
-                                self.pipe.image_processor.enable_group_offload(**kwargs)
-                            """
                             for name in _get_misc_module_names():
                                 if hasattr(self.pipe, name):
                                     module = getattr(self.pipe, name)
                                     if module is not None:
-                                        module.enable_group_offload(**kwargs)
+                                        try: module.enable_group_offload(**kwargs)
+                                        except: pass
+                self.progress = 80
 
                 # set lora
                 if lora is not None:
@@ -681,8 +672,10 @@ class CommonHost:
 
                         target.set_adapters(names, list(lora.values()))
                         loaded_adapters = target.active_adapters()
+                        loaded_adapters_string = ""
+                        for la in loaded_adapters: loaded_adapters_string += "\n        " + la
                         self.log(f"📟 Total loaded LoRAs: {len(loaded_adapters)}", rank_0_only=True)
-                        self.log(f"📚 Adapters: {str(loaded_adapters)}", rank_0_only=True)
+                        self.log(f"📚 Adapters: {loaded_adapters_string}", rank_0_only=True)
                         if len(names) > 0:  self.adapter_names = names
                         else:               self.adapter_names = None
 
@@ -690,6 +683,7 @@ class CommonHost:
                 for k, v in self.pipe.components.items():
                     try: v.eval()
                     except: pass
+                self.progress = 90
 
                 # compiles
                 if compile_config is not None:
@@ -747,7 +741,7 @@ class CommonHost:
 
         self.log("ℹ️ Loading model: " + model_path + " with config: " + str(config_path))
         kwargs = {}
-        kwargs["dtype"] = self.torch_dtype
+        kwargs["torch_dtype"] = self.torch_dtype
         kwargs["use_safetensors"] = True
         kwargs["local_files_only"] = True
         kwargs["low_cpu_mem_usage"] = True
@@ -764,7 +758,7 @@ class CommonHost:
         match model_type:
             case "AutoencoderKL":
                 if self.vae_dtype is not None:
-                    kwargs["dtype"] = self.vae_dtype
+                    kwargs["torch_dtype"] = self.vae_dtype
                 if is_checkpoint:   return AutoencoderKL.from_pretrained(model_path, **kwargs)
                 else:               return AutoencoderKL.from_single_file(model_path, **kwargs)
             case "ControlNetModel":
@@ -803,7 +797,7 @@ class CommonHost:
 
         self.log("ℹ️Loading model: " + model_path + " with config: " + str(config_path))
         kwargs = {}
-        kwargs["dtype"] = self.torch_dtype
+        kwargs["torch_dtype"] = self.torch_dtype
         kwargs["local_files_only"] = True
         kwargs["low_cpu_mem_usage"] = True
 
@@ -866,11 +860,23 @@ class CommonHost:
     def print_params(self, data):
         formatted = "📋 Received parameters:"
         for k, v in data.items():
-            if v is None or str(v) == "None": pass
-            if torch.is_tensor(v) or len(str(v)) > 256:
-                formatted += f'\n        {k}:{str(v is not None)}'
+            sv = str(v)
+            if v is None or len(sv) == 0:
+                continue
+            elif torch.is_tensor(v):
+                formatted += f'\n        {k}: {str(v is not None)}'
             else:
-                formatted += f'\n        {k}:{str(v)}'
+                if sv.startswith("{") and sv.endswith("}"):
+                    try:
+                        sv = format_json(v, indent=8, indent_all=True)
+                        formatted += f'\n        {k}: {sv}'
+                    except:
+                        formatted += f'\n        {k}: {str(v is not None)}'
+                else:
+                    if len(sv) < 128:
+                        formatted += f'\n        {k}: {sv}'
+                    else:
+                        formatted += f'\n        {k}: {str(v is not None)}'
         self.log(formatted, rank_0_only=True)
         return
 
@@ -941,55 +947,61 @@ class CommonHost:
 
 
     def set_scheduler_timesteps(self, start=0):
-        if start is not None and start > 0:
-            pipe_module = inspect.getmodule(self.pipe.__class__)
-            if pipe_module is not None:
-                if hasattr(pipe_module, 'old_retrieve_timesteps'):
-                    setattr(pipe_module, 'retrieve_timesteps', getattr(pipe_module, 'old_retrieve_timesteps'))
-                    delattr(pipe_module, 'old_retrieve_timesteps')
-                    if hasattr(pipe_module, 'new_retrieve_timesteps'):
-                        delattr(pipe_module, 'new_retrieve_timesteps')
+        pipe_module = inspect.getmodule(self.pipe.__class__)
+        if pipe_module is not None:
+            if hasattr(pipe_module, 'old_retrieve_timesteps'):
+                setattr(pipe_module, 'retrieve_timesteps', getattr(pipe_module, 'old_retrieve_timesteps'))
+                delattr(pipe_module, 'old_retrieve_timesteps')
+                if hasattr(pipe_module, 'new_retrieve_timesteps'):
+                    delattr(pipe_module, 'new_retrieve_timesteps')
 
-                old_retrieve_timesteps = getattr(pipe_module, 'retrieve_timesteps', None)
-                setattr(pipe_module, 'old_retrieve_timesteps', old_retrieve_timesteps)
+        if start is not None and start > 0 and pipe_module is not None:
+            old_retrieve_timesteps = getattr(pipe_module, 'retrieve_timesteps', None)
+            setattr(pipe_module, 'old_retrieve_timesteps', old_retrieve_timesteps)
 
-                def new_retrieve_timesteps(*args, **kwargs):
-                    nonlocal start
-                    result = lambda: old_retrieve_timesteps(*args, **kwargs)
-                    timesteps, num_inference_steps = result()
+            def new_retrieve_timesteps(*args, **kwargs):
+                nonlocal start
+                result = lambda: old_retrieve_timesteps(*args, **kwargs)
+                timesteps, num_inference_steps = result()
 
-                    if len(timesteps) > 0 and start > 0:
-                        # self.log("Old timesteps: " + str(timesteps), rank_0_only=True)
-                        timesteps = self.pipe.scheduler.timesteps[start * self.pipe.scheduler.order :]
-                        if hasattr(self.pipe.scheduler, "set_begin_index"):
-                            self.pipe.scheduler.set_begin_index(start * self.pipe.scheduler.order)
+                if len(timesteps) > 0 and start > 0:
+                    # self.log("Old timesteps: " + str(timesteps), rank_0_only=True)
+                    timesteps = self.pipe.scheduler.timesteps[start * self.pipe.scheduler.order :]
+                    if hasattr(self.pipe.scheduler, "set_begin_index"):
+                        self.pipe.scheduler.set_begin_index(start * self.pipe.scheduler.order)
 
-                        # self.log("New timesteps: " + str(timesteps), rank_0_only=True)
-                    return timesteps, num_inference_steps - start
-                setattr(pipe_module, 'retrieve_timesteps', new_retrieve_timesteps)
-            return
+                    # self.log("New timesteps: " + str(timesteps), rank_0_only=True)
+                return timesteps, num_inference_steps - start
+            setattr(pipe_module, 'retrieve_timesteps', new_retrieve_timesteps)
+        return
 
 
-    def setup_inference(self, data, backend_name=None, can_use_compel=True, speedup_step=-1):
+    def setup_inference(self, data, can_use_compel=True, speedup_message=None, speedup_step=-1):
         # set scheduler
-        if data["scheduler"] is not None:           self.set_scheduler(data["scheduler"])
-        elif self.default_scheduler is not None:    self.pipe.scheduler = self.default_scheduler
-        if data["latent"] is not None:              data["latent"] = self.process_input_latent(data["latent"])
+        if data["scheduler"] is not None:
+            self.set_scheduler(data["scheduler"])
+        elif self.default_scheduler is not None:
+            self.pipe.scheduler = self.default_scheduler
+
         self.set_scheduler_timesteps(data["denoising_start"])
+
+        if data["latent"] is not None:
+            data["latent"] = self.process_input_latent(data["latent"])
 
         # progress bar
         def set_step_progress(pipe, index, timestep, callback_kwargs):
             global get_scheduler_progressbar_offset_index
             nonlocal self, data
-            the_index = get_scheduler_progressbar_offset_index(pipe.scheduler, index)
             # self.log(str(callback_kwargs["latents"]), rank_0_only=True)
             if torch.any(callback_kwargs["latents"].isnan()):
-                self.log("⁉️ NaN detected in latents - stopping generation")
-                self.pipe._interrupt = True
+                self.log("⁉️ NaN detected in latents") # - stopping generation
+                # self.pipe._interrupt = True
+                # self.progress = 100
                 return callback_kwargs
+            the_index = get_scheduler_progressbar_offset_index(pipe.scheduler, index)
             self.progress = int(the_index / data["steps"] * 100)
             if the_index == speedup_step:
-                self.log(f"🚀 {str(backend_name)} warmup completed")
+                self.log(f"{str(speedup_message)}", rank_0_only=True)
             return callback_kwargs
 
         # compel
@@ -1121,9 +1133,11 @@ class CommonHost:
 
 
     def process_input_latent(self, latents):
+        assert not torch.any(latents.isnan()), "NaN in input latent"
+        # NOTE: this matters because it sometimes becomes NaN if you just move it to the target device
+        latents = latents.to(dtype=torch.float16, device=torch.device("cpu"))
+        latents = latents.to(device=self.pipe.device)
         latents = add_alpha_to_latent(latents)
-        latents = latents.to(device=self.pipe.device, dtype=self.torch_dtype)
-        # latents = normalize_latent(latents, max_val=3)
         return latents
 
 

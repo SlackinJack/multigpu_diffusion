@@ -24,6 +24,7 @@ from modules.utils import *
 
 app = Flask(__name__)
 async_diff = None
+asyncdiff_config = None
 base = None
 
 
@@ -48,7 +49,7 @@ def __run_host():
     parser.add_argument("--model_n",        type=int,   default=2) # NOTE: if n > 4, you'll need to manually map your model in pipe_config.py
     parser.add_argument("--stride",         type=int,   default=1)
     parser.add_argument("--synced_steps",   type=int,   default=3)
-    parser.add_argument("--synced_percent", type=float, default=None)
+    # parser.add_argument("--synced_percent", type=float, default=None)
     parser.add_argument("--time_shift",     action="store_true")
     # generic
     for k, v in GENERIC_HOST_ARGS.items():  parser.add_argument(f"--{k}", type=v, default=None)
@@ -103,25 +104,6 @@ def handle_path(path):
             return "", 404
 
 
-asyncdiff_config = None
-def __reset_asyncdiff(steps):
-    global asyncdiff_config
-    if asyncdiff_config.get("synced_percent") is not None and asyncdiff_config.get("synced_percent") > 0:
-        if asyncdiff_config.get("synced_steps") is not None and asyncdiff_config.get("synced_steps") > 0:
-            base.log("ℹ️ Received both synced_percent and synced_steps - synced_percentage takes precendent")
-        warmup_steps = (steps * asyncdiff_config.get("synced_percent")) // 100
-    else:
-        warmup_steps = asyncdiff_config.get("synced_steps")
-    __reset_asyncdiff_sync_state(warmup_steps)
-    return warmup_steps
-
-
-def __reset_asyncdiff_sync_state(synced_steps):
-    global async_diff
-    async_diff.reset_state(warm_up=synced_steps)
-    return
-
-
 def __handle_request_parallel(data):
     if data.get("pipeline_type") is not None:
         __apply_pipeline_parallel(data)
@@ -154,15 +136,19 @@ def __offload_modules_parallel():
     return __move_pipe("cpu")
 
 
-def __move_pipe_module(module, device):
+def __move_pipe_module(module, dev):
     global base
     try:
         mod = vars(base.pipe)[module]
-        cur_device = mod.device
-        tar_device = torch.device(device)
-        if cur_device != tar_device:
-            vars(base.pipe)[module] = mod.to(device=device)
-            if "cpu" in device: vars(base.pipe)[module] = mod.cpu()
+        c_device = torch.device(mod.device)
+        t_device = torch.device(dev)
+        if c_device != t_device:
+            vars(base.pipe)[module] = mod.to(device=t_device)
+            if "cpu" in dev:
+                vars(base.pipe)[module] = mod.cpu()
+            elif "cuda" in dev:
+                torch.cuda.set_device(tar_device)
+                torch.cuda.synchronize()
             return 0
         else:
             return -1
@@ -173,27 +159,27 @@ def __move_pipe_module(module, device):
 def __move_pipe(device):
     global base
 
-    # flag_sliced = False
-    if base.applied.get("enable_vae_slicing") is not None and base.applied.get("enable_vae_slicing") == True:
-        # flag_sliced = True
-        # base.pipe.disable_vae_tiling()
-        return '"enable_vae_slicing" is enabled - not offloading', 500
-
-    flag_tiled = False
-    if base.applied.get("enable_vae_tiling") is not None and base.applied.get("enable_vae_tiling") == True:
-        # flag_tiled = True
-        # base.pipe.disable_vae_tiling()
-        return '"enable_vae_tiling" is enabled - not offloading', 500
-
-    # TODO: make exception for moving module to cpu
     if base.applied.get("group_offload_config") is not None:
         return 'Group offloading active - not offloading', 500
+
+    flag_vae_sliced = False
+    if base.applied.get("enable_vae_slicing") is not None and base.applied.get("enable_vae_slicing") == True:
+        flag_vae_sliced = True
+        base.pipe.disable_vae_slicing()
+
+    flag_vae_tiled = False
+    if base.applied.get("enable_vae_tiling") is not None and base.applied.get("enable_vae_tiling") == True:
+        flag_vae_tiled = True
+        base.pipe.disable_vae_tiling()
+
+    flag_attention_sliced = False
+    if base.applied.get("enable_attention_slicing") is not None and base.applied.get("enable_attention_slicing") == True:
+        flag_attention_sliced = True
+        base.pipe.disable_attention_slicing()
 
     moved = []
     not_moved = []
     alr_moved = []
-    base.pipe = base.pipe.to(device=device)
-    if "cuda" in device: torch.cuda.set_device(device)
     for k, v in base.pipe.components.items():
         if v is not None:
             has_moved = __move_pipe_module(k, device)
@@ -201,17 +187,19 @@ def __move_pipe(device):
                 case 0: moved.append(k)
                 case 1: not_moved.append(k)
                 case -1: alr_moved.append(k)
+    base.pipe = base.pipe.to(device=torch.device(device))
 
-    # if flag_sliced: base.pipe.enable_vae_slicing()
-    # if flag_tiled: base.pipe.enable_vae_tiling()
+    if flag_vae_sliced: base.pipe.enable_vae_slicing()
+    if flag_vae_tiled: base.pipe.enable_vae_tiling()
+    if flag_attention_sliced: base.pipe.enable_attention_slicing()
 
     clean()
     dist.barrier()
     if ":" in device: device = device.split(":")[0]
-    msg = f"""ℹ️ Moved pipeline components:
-    Moved to {device}: {str(moved)}
-    Not moved to {device}: {str(not_moved)}
-    Already on {device}: {str(alr_moved)}"""
+    msg = f"""➡️ Moved pipeline components:
+        Moved to {device}: {str(moved)}
+        Not moved to {device}: {str(not_moved)}
+        Already on {device}: {str(alr_moved)}"""
     base.log(msg, rank_0_only=True)
     return msg, 200
 
@@ -247,29 +235,31 @@ def __apply_pipeline_parallel(data):
 
 
 def __generate_image_parallel(data):
-    global base
+    global async_diff, asyncdiff_config, base
 
     data = base.prepare_inputs(data)
 
     with torch.no_grad():
-        __move_pipe(f"cuda:{dist.get_rank()}")
+        __move_pipe(f"cuda:{base.local_rank}")
         torch.cuda.reset_peak_memory_stats()
-        warmup_steps = __reset_asyncdiff(data["steps"])
+        warmup_steps = asyncdiff_config.get("synced_steps")
+        async_diff.reset_state(warm_up=warmup_steps)
         base.progress = 0
 
         # inference kwargs
-        kwargs = base.setup_inference(data, backend_name="AsyncDiff", can_use_compel=True, speedup_step=warmup_steps)
+        kwargs = base.setup_inference(data, speedup_message="🚀 AsyncDiff warmup completed", can_use_compel=True, speedup_step=warmup_steps)
 
         # inference
         dist.barrier()
-        output = base.pipe(**kwargs)
+        with torch.inference_mode():
+            output = base.pipe(**kwargs)
+        dist.barrier()
 
         # clean up
         clean()
 
         # output
         if base.local_rank == 0:
-            base.progress = 100
             if output is not None:
                 if get_is_image_model(base.pipeline_type):
                     if base.pipeline_type in ["sdup"]:

@@ -92,13 +92,13 @@ def __generate_image_parallel(data):
         kwargs = base.setup_inference(data, can_use_compel=False)
 
         # inference
-        output = base.pipe(**kwargs)
+        with torch.inference_mode():
+            output = base.pipe(**kwargs)
 
         # clean up
         clean()
 
         # output
-        base.progress = 100
         if output is not None:
             if get_is_image_model(base.pipeline_type):
                 if base.pipeline_type in ["sdup"]:
