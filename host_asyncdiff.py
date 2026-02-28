@@ -247,7 +247,7 @@ def __generate_image_parallel(data):
         base.progress = 0
 
         # inference kwargs
-        kwargs = base.setup_inference(data, speedup_message="🚀 AsyncDiff warmup completed", can_use_compel=True, speedup_step=warmup_steps)
+        kwargs = base.setup_inference(data, can_use_compel=True, speedup_message="🚀 AsyncDiff warmup completed", speedup_step=warmup_steps)
 
         # inference
         dist.barrier()

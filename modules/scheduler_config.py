@@ -107,6 +107,7 @@ def get_scheduler_progressbar_offset_index(scheduler, index):
     return index
 
 
+# TODO: complete, or move to scheduler config
 def get_scheduler_config(scheduler_dict, current_scheduler_config):
     for k, v in scheduler_dict.items():
         if k == "scheduler": continue

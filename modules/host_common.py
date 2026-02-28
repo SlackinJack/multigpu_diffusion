@@ -795,7 +795,7 @@ class CommonHost:
             config_path = model_dict.get("config")
             assert config_path is not None, "You must provide a config_path when loading from a single file"
 
-        self.log("ℹ️Loading model: " + model_path + " with config: " + str(config_path))
+        self.log("ℹ️ Loading model: " + model_path + " with config: " + str(config_path))
         kwargs = {}
         kwargs["torch_dtype"] = self.torch_dtype
         kwargs["local_files_only"] = True
@@ -999,8 +999,11 @@ class CommonHost:
                 # self.progress = 100
                 return callback_kwargs
             the_index = get_scheduler_progressbar_offset_index(pipe.scheduler, index)
+            if data["denoising_end"] is not None and the_index >= data["denoising_end"]:
+                self.log("ℹ️ Denoising end reached - stopping generation")
+                self.pipe._interrupt = True
             self.progress = int(the_index / data["steps"] * 100)
-            if the_index == speedup_step:
+            if the_index == speedup_step - 1:
                 self.log(f"{str(speedup_message)}", rank_0_only=True)
             return callback_kwargs
 
