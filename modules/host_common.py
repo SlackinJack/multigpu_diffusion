@@ -327,11 +327,15 @@ class CommonHost:
 
 
     def close_pipeline(self):
+        # TODO: fix this method to properly free up resources
+        # self.local_rank = -1
         self.vae_dtype = None
+        self.torch_dtype = torch.float16
         self.initialized = False
         self.progress = 0
         self.pipe = None
         self.pipeline_type = None
+        # self.logger = None
         self.default_scheduler = None
         self.adapter_names = None
         self.applied = None
@@ -420,12 +424,11 @@ class CommonHost:
                 self.log(f"⚙️ Initializing pipeline")
 
                 # reset current
-                self.progress = 0
-                self.pipeline_type = pipeline_type
-                if hasattr(self, "pipe"): del self.pipe
+                self.close_pipeline()
                 clean()
-                self.pipe = None
-                PipelineClass = None
+
+                # setup current
+                self.pipeline_type = pipeline_type
 
                 # dynamo tweaks
                 if torch_config is not None:
@@ -994,9 +997,9 @@ class CommonHost:
             nonlocal self, data
             # self.log(str(callback_kwargs["latents"]), rank_0_only=True)
             if torch.any(callback_kwargs["latents"].isnan()):
-                self.log("⁉️ NaN detected in latents") # - stopping generation
-                # self.pipe._interrupt = True
-                # self.progress = 100
+                self.log("⁉️ NaN detected in latents - stopping generation")
+                self.pipe._interrupt = True
+                self.progress = 100
                 return callback_kwargs
             the_index = get_scheduler_progressbar_offset_index(pipe.scheduler, index)
             if data["denoising_end"] is not None and the_index >= data["denoising_end"]:
