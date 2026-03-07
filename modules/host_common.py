@@ -6,6 +6,7 @@ import numpy
 import os
 import safetensors
 import torch
+import torch.nn.functional as F
 import traceback
 from diffusers import (
     AutoencoderKL,
@@ -1041,6 +1042,13 @@ class CommonHost:
             if data["negative_embeds"] is not None:
                 data["negative_pooled_embeds"]      = data["negative_embeds"][0][1]["pooled_output"]
                 data["negative_embeds"]             = data["negative_embeds"][0][0]
+
+        if data["positive_embeds"] is not None and data["negative_embeds"] is not None:
+            dim_1 = max(data["positive_embeds"].size(1), data["negative_embeds"].size(1))
+            pad_pos = max(0, dim_1 - data["positive_embeds"].size(1))
+            pad_neg = max(0, dim_1 - data["negative_embeds"].size(1))
+            if pad_pos > 0: data["positive_embeds"] = F.pad(data["positive_embeds"], (0, 0, 0, pad_pos))
+            if pad_neg > 0: data["negative_embeds"] = F.pad(data["negative_embeds"], (0, 0, 0, pad_neg))
 
         # set pipe
         kwargs                                                  = {}
