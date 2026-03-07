@@ -309,9 +309,17 @@ class CommonHost:
 
     def set_logger(self):
         if self.logger is None:
-            logging.root.setLevel(logging.NOTSET)
-            logging.basicConfig(level=logging.INFO)
-            self.logger = logging.getLogger(f"[Rank {str(self.local_rank)}]")
+            logger = logging.getLogger(name=str(self.local_rank))
+            logger.setLevel(logging.INFO)
+            if logger.hasHandlers():
+                logger.handlers.clear()
+            handler = logging.StreamHandler()
+            handler.setLevel(logging.INFO)
+            formatter = logging.Formatter(fmt=f'[Rank {str(self.local_rank)}]: %(message)s')
+            handler.setFormatter(formatter)
+            logger.addHandler(handler)
+            logger.propagate = False
+            self.logger = logger
         return
 
 
@@ -1006,7 +1014,7 @@ class CommonHost:
                 self.log("ℹ️ Denoising end reached - stopping generation")
                 self.pipe._interrupt = True
             self.progress = int(the_index / data["steps"] * 100)
-            if the_index == speedup_step - 1:
+            if the_index == speedup_step:
                 self.log(f"{str(speedup_message)}", rank_0_only=True)
             return callback_kwargs
 
@@ -1094,8 +1102,8 @@ class CommonHost:
                     kwargs["pooled_prompt_embeds"]              = data["positive_embeds"][0][1]["pooled_output"]
                     kwargs["prompt_embeds"]                     = data["positive_embeds"][0][0]
                 if data["negative_embeds"] is not None:
-                    kwargs["negative_pooled_embeds"]            = data["negative_embeds"][0][1]["pooled_output"]
-                    kwargs["negative_embeds"]                   = data["negative_embeds"][0][0]
+                    kwargs["negative_pooled_prompt_embeds"]            = data["negative_embeds"][0][1]["pooled_output"]
+                    kwargs["negative_prompt_embeds"]                   = data["negative_embeds"][0][0]
             case "flux": # TODO: complete
                 kwargs["output_type"]                           = "latent"
                 kwargs["guidance_scale"]                        = data["cfg"]
@@ -1107,25 +1115,28 @@ class CommonHost:
                     kwargs["pooled_prompt_embeds"]              = data["positive_embeds"][0][1]["pooled_output"]
                     kwargs["prompt_embeds"]                     = data["positive_embeds"][0][0]
                 if data["negative_embeds"] is not None:
-                    kwargs["negative_pooled_embeds"]            = data["negative_embeds"][0][1]["pooled_output"]
-                    kwargs["negative_embeds"]                   = data["negative_embeds"][0][0]
+                    kwargs["negative_pooled_prompt_embeds"]     = data["negative_embeds"][0][1]["pooled_output"]
+                    kwargs["negative_prompt_embeds"]            = data["negative_embeds"][0][0]
             case _: # NOTE: "sd1", "sd2", "sd3", "sdxl"
                 kwargs["output_type"]                           = "latent"
                 kwargs["guidance_scale"]                        = data["cfg"]
-                if self.pipeline_type in ["sd1", "sd2", "sd3", "sdxl"]: kwargs["clip_skip"] = data["clip_skip"]
+
+                if self.pipeline_type in ["sd1", "sd2", "sd3", "sdxl"]:
+                    kwargs["clip_skip"] = data["clip_skip"]
 
                 if data["latent"] is not None:
                     kwargs["latents"] = data["latent"]
                 else:
-                    if data["height"] is not None:              kwargs["height"]                    = data["height"]
-                    if data["width"] is not None:               kwargs["width"]                     = data["width"]
-                if data["positive"] is not None:                kwargs["prompt"]                    = data["positive"]
-                if data["negative"] is not None:                kwargs["negative_prompt"]           = data["negative"]
-                if data["positive_embeds"] is not None:         kwargs["prompt_embeds"]             = data["positive_embeds"]
-                if data["positive_pooled_embeds"] is not None:  kwargs["pooled_prompt_embeds"]      = data["positive_pooled_embeds"]
-                if data["negative_embeds"] is not None:         kwargs["negative_embeds"]           = data["negative_embeds"]
-                if data["negative_pooled_embeds"] is not None:  kwargs["negative_pooled_embeds"]    = data["negative_pooled_embeds"]
-                if data["denoising_end"] is not None:           kwargs["denoising_end"]             = float(data["denoising_end"] / data["steps"])
+                    if data["height"] is not None:              kwargs["height"]                        = data["height"]
+                    if data["width"] is not None:               kwargs["width"]                         = data["width"]
+
+                if data["positive"] is not None:                kwargs["prompt"]                        = data["positive"]
+                if data["negative"] is not None:                kwargs["negative_prompt"]               = data["negative"]
+                if data["positive_embeds"] is not None:         kwargs["prompt_embeds"]                 = data["positive_embeds"]
+                if data["positive_pooled_embeds"] is not None:  kwargs["pooled_prompt_embeds"]          = data["positive_pooled_embeds"]
+                if data["negative_embeds"] is not None:         kwargs["negative_prompt_embeds"]        = data["negative_embeds"]
+                if data["negative_pooled_embeds"] is not None:  kwargs["negative_pooled_prompt_embeds"] = data["negative_pooled_embeds"]
+                if data["denoising_end"] is not None:           kwargs["denoising_end"]                 = float(data["denoising_end"] / data["steps"])
 
                 if self.applied.get("ip_adapter") is not None and data["ip_image"] is not None:
                     kwargs["ip_adapter_image"]                  = data["ip_image"]

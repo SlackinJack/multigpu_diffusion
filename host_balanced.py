@@ -98,6 +98,8 @@ def __generate_image_parallel(data):
         # clean up
         clean()
 
+        base.progress = 100
+
         # output
         if output is not None:
             if get_is_image_model(base.pipeline_type):

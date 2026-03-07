@@ -258,6 +258,8 @@ def __generate_image_parallel(data):
         # clean up
         clean()
 
+        base.progress = 100
+
         # output
         if base.local_rank == 0:
             if output is not None:
