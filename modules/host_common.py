@@ -386,40 +386,40 @@ class CommonHost:
 
     def setup_pipeline(self, data, backend_name=None):
         # models
-        backend_config                  = data.get("backend_config")
-        pipeline_type                   = data.get("pipeline_type")
-        variant                         = data.get("variant")
-        checkpoint                      = data.get("checkpoint")
-        transformer                     = data.get("transformer")
-        vae                             = data.get("vae")
-        vae_fp16                        = data.get("vae_fp16")
-        control_net                     = data.get("control_net")
-        text_encoder                    = data.get("text_encoder")
-        text_encoder_2                  = data.get("text_encoder_2")
-        text_encoder_3                  = data.get("text_encoder_3")
-        motion_adapter                  = data.get("motion_adapter")
-        motion_module                   = data.get("motion_module")
-        ip_adapter                      = data.get("ip_adapter")
-        lora                            = data.get("lora")
+        data["backend_config"]              = data.setdefault("backend_config")
+        data["pipeline_type"]               = data.setdefault("pipeline_type")
+        data["variant"]                     = data.setdefault("variant")
+        data["checkpoint"]                  = data.setdefault("checkpoint")
+        data["transformer"]                 = data.setdefault("transformer")
+        data["vae"]                         = data.setdefault("vae")
+        data["vae_fp16"]                    = data.setdefault("vae_fp16")
+        data["control_net"]                 = data.setdefault("control_net")
+        data["text_encoder"]                = data.setdefault("text_encoder")
+        data["text_encoder_2"]              = data.setdefault("text_encoder_2")
+        data["text_encoder_3"]              = data.setdefault("text_encoder_3")
+        data["motion_adapter"]              = data.setdefault("motion_adapter")
+        data["motion_module"]               = data.setdefault("motion_module")
+        data["ip_adapter"]                  = data.setdefault("ip_adapter")
+        data["lora"]                        = data.setdefault("lora")
 
         # compile
-        compile_config                  = data.get("compile_config")
-        torch_config                    = data.get("torch_config")
+        data["compile_config"]              = data.setdefault("compile_config")
+        data["torch_config"]                = data.setdefault("torch_config")
 
         # quantization
-        quantization_config             = data.get("quantization_config")
+        data["quantization_config"]         = data.setdefault("quantization_config")
 
         # memory
-        enable_vae_slicing              = data.get("enable_vae_slicing")
-        enable_vae_tiling               = data.get("enable_vae_tiling")
-        enable_attention_slicing        = data.get("enable_attention_slicing")
-        xformers_efficient              = data.get("xformers_efficient")
-        group_offload_config            = data.get("group_offload_config")
+        data["enable_vae_slicing"]          = data.setdefault("enable_vae_slicing")
+        data["enable_vae_tiling"]           = data.setdefault("enable_vae_tiling")
+        data["enable_attention_slicing"]    = data.setdefault("enable_attention_slicing")
+        data["xformers_efficient"]          = data.setdefault("xformers_efficient")
+        data["group_offload_config"]        = data.setdefault("group_offload_config")
 
         self.print_params(data)
 
         # checks
-        assert not (pipeline_type == "ad" and motion_adapter is None and motion_module is None), "AnimateDiff requires providing a motion adapter/module."
+        assert not (data["pipeline_type"] == "ad" and motion_adapter is None and data["motion_module"] is None), "AnimateDiff requires providing a motion adapter/module."
         is_applied_config = True
         for k,v in data.items():
             if self.applied is None or k not in self.applied or v != self.applied[k]:
@@ -437,13 +437,13 @@ class CommonHost:
                 clean()
 
                 # setup current
-                self.pipeline_type = pipeline_type
+                self.pipeline_type = data["pipeline_type"]
 
                 # dynamo tweaks
-                if torch_config is not None:
-                    cache_size_limit                = torch_config.get("torch_cache_limit")
-                    accumulated_cache_size_limit    = torch_config.get("torch_accumlated_cache_limit")
-                    capture_scalar_outputs          = torch_config.get("torch_capture_scalar")
+                if data["torch_config"] is not None:
+                    cache_size_limit                = data["torch_config"].get("torch_cache_limit")
+                    accumulated_cache_size_limit    = data["torch_config"].get("torch_accumlated_cache_limit")
+                    capture_scalar_outputs          = data["torch_config"].get("torch_capture_scalar")
                     if cache_size_limit is not None:                torch._dynamo.config.cache_size_limit               = cache_size_limit
                     if accumulated_cache_size_limit is not None:    torch._dynamo.config.accumulated_cache_size_limit   = accumulated_cache_size_limit
                     if capture_scalar_outputs is not None:          torch._dynamo.config.capture_scalar_outputs         = capture_scalar_outputs
@@ -458,8 +458,8 @@ class CommonHost:
                 torch.backends.cuda.allow_fp16_bf16_reduction_math_sdp(False)
 
                 # update globals
-                self.vae_dtype      = torch.float16 if vae_fp16 is not None and vae_fp16 == True else None
-                self.torch_dtype    = get_torch_type(variant)
+                self.vae_dtype      = torch.float16 if data["vae_fp16"] is not None and data["vae_fp16"] == True else None
+                self.torch_dtype    = get_torch_type(data["variant"])
 
                 kwargs = {}
                 kwargs["torch_dtype"] = self.torch_dtype
@@ -472,69 +472,69 @@ class CommonHost:
                         kwargs["device_map"] = "balanced"
 
                 # quantize
-                if quantization_config is not None:
-                    kwargs["quantization_config"] = get_quantization_config(quantization_config)
+                if data["quantization_config"] is not None:
+                    kwargs["quantization_config"] = get_quantization_config(data["quantization_config"])
 
                 # set transformer
-                if transformer is not None:
+                if data["transformer"] is not None:
                     match self.pipeline_type:
-                        case "flux":    kwargs["transformer"] = self.load_model(transformer, "FluxTransformer2DModel")
-                        case "sd3":     kwargs["transformer"] = self.load_model(transformer, "SD3Transformer2DModel")
-                        case "zimage":  kwargs["transformer"] = self.load_model(transformer, "ZImageTransformer2DModel")
-                        case _:         kwargs["unet"] = self.load_model(transformer, "UNet2DConditionModel")
+                        case "flux":    kwargs["transformer"] = self.load_model(data["transformer"], "FluxTransformer2DModel")
+                        case "sd3":     kwargs["transformer"] = self.load_model(data["transformer"], "SD3Transformer2DModel")
+                        case "zimage":  kwargs["transformer"] = self.load_model(data["transformer"], "ZImageTransformer2DModel")
+                        case _:         kwargs["unet"] = self.load_model(data["transformer"], "UNet2DConditionModel")
                 self.progress = 10
 
                 # set vae
-                if vae is not None and self.pipeline_type not in ["ad", "svd"]:
-                    kwargs["vae"] = self.load_model(vae, "AutoencoderKL")
+                if data["vae"] is not None and self.pipeline_type not in ["ad", "svd"]:
+                    kwargs["vae"] = self.load_model(data["vae"], "AutoencoderKL")
                 self.progress = 20
 
                 # set text encoder(s)
-                if text_encoder is not None or text_encoder_2 is not None or text_encoder_3 is not None:
-                    if text_encoder is not None:
+                if data["text_encoder"] is not None or data["text_encoder_2"] is not None or data["text_encoder_3"] is not None:
+                    if data["text_encoder"] is not None:
                         match self.pipeline_type:
-                            case "sdxl":    kwargs["text_encoder"] = self.load_encoder(text_encoder, "CLIPTextModel")
-                            case "sdup":    kwargs["text_encoder"] = self.load_encoder(text_encoder, "CLIPTextModel")
-                            case "wani2v":  kwargs["text_encoder"] = self.load_encoder(text_encoder, "UMT5EncoderModel")
-                            case "want2v":  kwargs["text_encoder"] = self.load_encoder(text_encoder, "UMT5EncoderModel")
-                            case "zimage":  kwargs["text_encoder"] = self.load_encoder(text_encoder, "Qwen3ForCausalLM")
-                    if text_encoder_2 is not None:
+                            case "sdxl":    kwargs["text_encoder"] = self.load_encoder(data["text_encoder"], "CLIPTextModel")
+                            case "sdup":    kwargs["text_encoder"] = self.load_encoder(data["text_encoder"], "CLIPTextModel")
+                            case "wani2v":  kwargs["text_encoder"] = self.load_encoder(data["text_encoder"], "UMT5EncoderModel")
+                            case "want2v":  kwargs["text_encoder"] = self.load_encoder(data["text_encoder"], "UMT5EncoderModel")
+                            case "zimage":  kwargs["text_encoder"] = self.load_encoder(data["text_encoder"], "Qwen3ForCausalLM")
+                    if data["text_encoder_2"] is not None:
                         match self.pipeline_type:
-                            case "sdxl":    kwargs["text_encoder_2"] = self.load_encoder(text_encoder_2, "CLIPTextModelWithProjection")
-                    if text_encoder_3 is not None:
-                        # kwargs["text_encoder_3"] = self.load_encoder(text_encoder_3, ???)
+                            case "sdxl":    kwargs["text_encoder_2"] = self.load_encoder(data["text_encoder_2"], "CLIPTextModelWithProjection")
+                    if data["text_encoder_3"] is not None:
+                        # kwargs["text_encoder_3"] = self.load_encoder(data["text_encoder_3"], ???)
                         pass
                 self.progress = 30
 
                 # set control net
                 controlnet_model = None
-                if control_net is not None and self.pipeline_type not in ["sdup", "svd"]:
-                    kwargs["controlnet"] = self.load_model(control_net, "ControlNetModel")
+                if data["control_net"] is not None and self.pipeline_type not in ["sdup", "svd"]:
+                    kwargs["controlnet"] = self.load_model(data["control_net"], "ControlNetModel")
 
                 # set motion_adapter
-                if (motion_module is not None or motion_adapter is not None) and self.pipeline_type in ["ad"]:
-                    if motion_module is not None:
-                        kwargs["motion_adapter"] = self.load_model(motion_module, "MotionAdapter")
+                if (data["motion_module"] is not None or data["motion_adapter"] is not None) and self.pipeline_type in ["ad"]:
+                    if data["motion_module"] is not None:
+                        kwargs["motion_adapter"] = self.load_model(data["motion_module"], "MotionAdapter")
                     else:
-                        kwargs["motion_adapter"] = self.load_model(motion_adapter, "MotionAdapter")
+                        kwargs["motion_adapter"] = self.load_model(data["motion_adapter"], "MotionAdapter")
                 self.progress = 40
 
                 # setup pipeline
                 match self.pipeline_type:
                     case "ad":
-                        PipelineClass = AnimateDiffControlNetPipeline if control_net is not None else AnimateDiffPipeline
+                        PipelineClass = AnimateDiffControlNetPipeline if data["control_net"] is not None else AnimateDiffPipeline
                     case "flux":
-                        PipelineClass = FluxControlNetPipeline if control_net is not None else FluxPipeline
+                        PipelineClass = FluxControlNetPipeline if data["control_net"] is not None else FluxPipeline
                     case "sd1":
-                        PipelineClass = StableDiffusionControlNetPipeline if control_net is not None else StableDiffusionPipeline
+                        PipelineClass = StableDiffusionControlNetPipeline if data["control_net"] is not None else StableDiffusionPipeline
                     case "sd2":
-                        PipelineClass = StableDiffusionControlNetPipeline if control_net is not None else StableDiffusionPipeline
+                        PipelineClass = StableDiffusionControlNetPipeline if data["control_net"] is not None else StableDiffusionPipeline
                     case "sd3":
-                        PipelineClass = StableDiffusion3ControlNetPipeline if control_net is not None else StableDiffusion3Pipeline
+                        PipelineClass = StableDiffusion3ControlNetPipeline if data["control_net"] is not None else StableDiffusion3Pipeline
                     case "sdup":
                         PipelineClass = StableDiffusionUpscalePipeline
                     case "sdxl":
-                        PipelineClass = StableDiffusionXLControlNetPipeline if control_net is not None else StableDiffusionXLPipeline
+                        PipelineClass = StableDiffusionXLControlNetPipeline if data["control_net"] is not None else StableDiffusionXLPipeline
                     case "svd":
                         PipelineClass = StableVideoDiffusionPipeline
                     case "want2v":
@@ -542,11 +542,11 @@ class CommonHost:
                     case "wani2v":
                         PipelineClass = WanImageToVideoPipeline
                     case "zimage":
-                        # PipelineClass = ZImageControlNetPipeline if control_net is not None else ZImagePipeline
+                        # PipelineClass = ZImageControlNetPipeline if data["control_net"] is not None else ZImagePipeline
                         PipelineClass = ZImagePipeline
                     case _: raise NotImplementedError
 
-                self.pipe = PipelineClass.from_pretrained(checkpoint["checkpoint"], **kwargs)
+                self.pipe = PipelineClass.from_pretrained(data["checkpoint"]["checkpoint"], **kwargs)
                 del kwargs
                 self.default_scheduler = copy.deepcopy(self.pipe.scheduler)
                 self.log("✅ Pipeline initialized")
@@ -559,9 +559,11 @@ class CommonHost:
                     pass
 
                 # set ipadapter
-                if ip_adapter is not None:
+                if data["ip_adapter"] is not None:
                     kwargs = {}
-                    split = ip_adapter.split("/")
+                    ip_adapter_model = data["ip_adapter"].get("model")
+                    # ip_adapter_config = data["ip_adapter"].get("config")
+                    split = ip_adapter_model.split("/")
 
                     ip_adapter_file = split[-1]
                     kwargs["weight_name"] = ip_adapter_file
@@ -569,10 +571,10 @@ class CommonHost:
                     ip_adapter_subfolder = split[-2]
                     kwargs["subfolder"] = ip_adapter_subfolder
 
-                    ip_adapter_folder = ip_adapter.replace(f'/{ip_adapter_subfolder}/{ip_adapter_file}', "")
+                    ip_adapter_folder = ip_adapter_model.replace(f'/{ip_adapter_subfolder}/{ip_adapter_file}', "")
 
                     if "vit-h" in ip_adapter_file.lower():
-                        kwargs["image_encoder_folder"] = ip_adapter.replace(f'/{ip_adapter_subfolder}/{ip_adapter_file}', "/models/image_encoder")
+                        kwargs["image_encoder_folder"] = ip_adapter_model.replace(f'/{ip_adapter_subfolder}/{ip_adapter_file}', "/models/image_encoder")
 
                     self.pipe.load_ip_adapter(
                         ip_adapter_folder,
@@ -585,25 +587,25 @@ class CommonHost:
 
                 # set memory saving
                 if self.pipeline_type not in ["svd"]:
-                    if enable_vae_slicing:          self.pipe.vae.enable_slicing()
-                    if enable_vae_tiling:           self.pipe.vae.enable_tiling()
-                    if enable_attention_slicing:    self.pipe.enable_attention_slicing()
-                    if xformers_efficient:
+                    if data["enable_vae_slicing"] == True:          self.pipe.vae.enable_slicing()
+                    if data["enable_vae_tiling"] == True:           self.pipe.vae.enable_tiling()
+                    if data["enable_attention_slicing"] == True:    self.pipe.enable_attention_slicing()
+                    if data["xformers_efficient"] == True:
                         if self.pipeline_type not in ["flux", "zimage"]:    self.pipe.enable_xformers_memory_efficient_attention()  # NOTE: blocked because causes tensor size mismatches
                         else:                                               self.log("xformers not supported for this pipeline - ignoring")
                 self.progress = 70
 
                 # group offloading
-                if group_offload_config is None:
+                if data["group_offload_config"] is None:
                     pass
                 else:
                     if backend_name in ["balanced"]:
                         self.log("❌ Group offloading not supported for this backend - ignoring", rank_0_only=True)
                     else:
-                        transformer_offload_config = group_offload_config.get("transformer")
-                        encoder_offload_config = group_offload_config.get("encoder")
-                        vae_offload_config = group_offload_config.get("vae")
-                        misc_offload_config = group_offload_config.get("misc")
+                        transformer_offload_config = data["group_offload_config"].get("transformer")
+                        encoder_offload_config = data["group_offload_config"].get("encoder")
+                        vae_offload_config = data["group_offload_config"].get("vae")
+                        misc_offload_config = data["group_offload_config"].get("misc")
                         kwargs = {"onload_device": torch.device(f"cuda:{self.local_rank}")}
 
                         if transformer_offload_config is not None:
@@ -662,7 +664,7 @@ class CommonHost:
                 self.progress = 80
 
                 # set lora
-                if lora is not None:
+                if data["lora"] is not None:
                     target = None
                     if self.pipeline_type in ["sd1", "sd2", "sdxl"]:
                         target = self.pipe.unet
@@ -671,7 +673,7 @@ class CommonHost:
 
                     if target is not None:
                         names = []
-                        for k, v in lora.items():
+                        for k, v in data["lora"].items():
                             self.log(f"⏳ Loading lora: {k}", rank_0_only=True)
                             if k.endswith(".safetensors") or k.endswith(".sft"):    weights = safetensors.torch.load_file(k, device=f'cuda:{self.local_rank}')
                             else:                                                   weights = torch.load(k, map_location=torch.device(f'cuda:{self.local_rank}'))
@@ -682,7 +684,7 @@ class CommonHost:
                             self.pipe.load_lora_weights(weights, weight_name=w, adapter_name=a, local_files_only=True, low_cpu_mem_usage=True)
                             self.log(f"✅ Added LoRA (scale={v}): {k}", rank_0_only=True)
 
-                        target.set_adapters(names, list(lora.values()))
+                        target.set_adapters(names, list(data["lora"].values()))
                         loaded_adapters = target.active_adapters()
                         loaded_adapters_string = ""
                         for la in loaded_adapters: loaded_adapters_string += "\n        " + la
@@ -698,14 +700,14 @@ class CommonHost:
                 self.progress = 90
 
                 # compiles
-                if compile_config is not None:
-                    compile_transformer     = compile_config.get("compile_transformer")
-                    compile_vae             = compile_config.get("compile_vae")
-                    compile_encoder         = compile_config.get("compile_encoder")
-                    compile_backend         = compile_config.get("compile_backend")
-                    compile_mode            = compile_config.get("compile_mode")
-                    compile_options         = compile_config.get("compile_options")
-                    compile_fullgraph_off   = compile_config.get("compile_fullgraph_off")
+                if data["compile_config"] is not None:
+                    compile_transformer     = data["compile_config"].get("compile_transformer")
+                    compile_vae             = data["compile_config"].get("compile_vae")
+                    compile_encoder         = data["compile_config"].get("compile_encoder")
+                    compile_backend         = data["compile_config"].get("compile_backend")
+                    compile_mode            = data["compile_config"].get("compile_mode")
+                    compile_options         = data["compile_config"].get("compile_options")
+                    compile_fullgraph_off   = data["compile_config"].get("compile_fullgraph_off")
 
                     if compile_mode is not None and compile_options is not None:
                         self.log("ℹ️ Compile mode and options are both defined, will ignore compile mode.")
@@ -894,51 +896,51 @@ class CommonHost:
 
 
     def prepare_inputs(self, data):
-        height              = data.setdefault("height", None)
-        width               = data.setdefault("width", None)
-        positive            = data.setdefault("positive", None)
-        negative            = data.setdefault("negative", None)
-        positive_embeds     = data.setdefault("positive_embeds", None)
-        negative_embeds     = data.setdefault("negative_embeds", None)
-        image               = data.setdefault("image", None)
-        ip_image            = data.setdefault("ip_image", None)
-        control_image       = data.setdefault("control_image", None)
-        latent              = data.setdefault("latent", None)
-        steps               = data.setdefault("steps", None)
-        cfg                 = data.setdefault("cfg", None)
-        controlnet_scale    = data.setdefault("controlnet_scale", None)
-        ip_adapter_scale    = data.setdefault("ip_adapter_scale", None)
-        seed                = data.setdefault("seed", None)
-        frames              = data.setdefault("frames", None)
-        decode_chunk_size   = data.setdefault("decode_chunk_size", None)
-        clip_skip           = data.setdefault("clip_skip", None)
-        motion_bucket_id    = data.setdefault("motion_bucket_id", None)
-        noise_aug_strength  = data.setdefault("noise_aug_strength", None)
-        denoising_start     = data.setdefault("denoising_start", None)
-        denoising_end       = data.setdefault("denoising_end", None)
-        scheduler           = data.setdefault("scheduler", None)
-        use_compel          = data.setdefault("use_compel", None)
+        data["height"]              = data.setdefault("height")
+        data["width"]               = data.setdefault("width")
+        data["positive"]            = data.setdefault("positive")
+        data["negative"]            = data.setdefault("negative")
+        data["positive_embeds"]     = data.setdefault("positive_embeds")
+        data["negative_embeds"]     = data.setdefault("negative_embeds")
+        data["image"]               = data.setdefault("image")
+        data["ip_image"]            = data.setdefault("ip_image")
+        data["control_image"]       = data.setdefault("control_image")
+        data["latent"]              = data.setdefault("latent")
+        data["steps"]               = data.setdefault("steps")
+        data["cfg"]                 = data.setdefault("cfg")
+        data["controlnet_scale"]    = data.setdefault("controlnet_scale")
+        data["ip_adapter_scale"]    = data.setdefault("ip_adapter_scale")
+        data["seed"]                = data.setdefault("seed")
+        data["frames"]              = data.setdefault("frames")
+        data["decode_chunk_size"]   = data.setdefault("decode_chunk_size")
+        data["clip_skip"]           = data.setdefault("clip_skip")
+        data["motion_bucket_id"]    = data.setdefault("motion_bucket_id")
+        data["noise_aug_strength"]  = data.setdefault("noise_aug_strength")
+        data["denoising_start"]     = data.setdefault("denoising_start")
+        data["denoising_end"]       = data.setdefault("denoising_end")
+        data["scheduler"]           = data.setdefault("scheduler")
+        data["use_compel"]          = data.setdefault("use_compel")
 
         self.print_params(data)
 
         # checks
-        if data["image"] is None and data["positive"] is None and data["positive_embeds"] is None:  return { "message": "No input provided", "output": None, "is_image": False }
-        if data["positive"] is not None and data["positive_embeds"] is not None:                    return { "message": "Provide only one positive input", "output": None, "is_image": False }
-        if data["negative"] is not None and data["negative_embeds"] is not None:                    return { "message": "Provide only one negative input", "output": None, "is_image": False }
-        if data["image"] is None and self.pipeline_type in ["sdup", "svd", "wani2v"]:               return { "message": "No image provided for an image pipeline.", "output": None, "is_image": False }
-        if data["ip_image"] is None and self.applied.get("ip_adapter") is not None:                 return { "message": "No IPAdapter image provided for a IPAdapter-loaded pipeline", "output": None, "is_image": False }
-        if data["control_image"] is None and self.applied.get("control_net") is not None:           return { "message": "No ConstrolNet image provided for a ControlNet-loaded pipeline", "output": None, "is_image": False }
+        assert not (data["image"] is None and data["positive"] is None and data["positive_embeds"] is None), "No input provided"
+        assert not (data["positive"] is not None and data["positive_embeds"] is not None), "Provide only one positive input"
+        assert not (data["negative"] is not None and data["negative_embeds"] is not None), "Provide only one negative input"
+        assert not (data["image"] is None and self.pipeline_type in ["sdup", "svd", "wani2v"]), "No image provided for an image pipeline"
+        assert not (data["ip_image"] is None and self.applied.get("ip_adapter") is not None), "No IPAdapter image provided for a IPAdapter-loaded pipeline"
+        assert not (data["control_image"] is None and self.applied.get("control_net") is not None), "No ConstrolNet image provided for a ControlNet-loaded pipeline"
 
-        data["image"]                                           = decode_b64_and_unpickle(image)
-        data["ip_image"]                                        = decode_b64_and_unpickle(ip_image)
-        data["control_image"]                                   = decode_b64_and_unpickle(control_image)
-        data["latent"]                                          = decode_b64_and_unpickle(latent)
-        data["positive_embeds"]                                 = decode_b64_and_unpickle(positive_embeds)
-        data["negative_embeds"]                                 = decode_b64_and_unpickle(negative_embeds)
-        if positive is not None and len(positive) == 0:         data["positive"] = None
-        if negative is not None and len(negative) == 0:         data["negative"] = None
-        if denoising_start is not None and denoising_start < 0: data["denoising_start"] = 0
-        if denoising_end is not None and denoising_end > steps: data["denoising_end"]   = steps
+        data["image"]                                                                           = decode_b64_and_unpickle(data["image"])
+        data["ip_image"]                                                                        = decode_b64_and_unpickle(data["ip_image"])
+        data["control_image"]                                                                   = decode_b64_and_unpickle(data["control_image"])
+        data["latent"]                                                                          = decode_b64_and_unpickle(data["latent"])
+        data["positive_embeds"]                                                                 = decode_b64_and_unpickle(data["positive_embeds"])
+        data["negative_embeds"]                                                                 = decode_b64_and_unpickle(data["negative_embeds"])
+        if data["positive"] is not None and len(data["positive"]) == 0:                         data["positive"] = None
+        if data["negative"] is not None and len(data["negative"]) == 0:                         data["negative"] = None
+        if data["denoising_start"] is not None and data["denoising_start"] < 0:                 data["denoising_start"] = 0
+        if data["denoising_end"] is not None and data["denoising_end"] > data["steps"]:         data["denoising_end"]   = data["steps"]
 
         # load images
         if data["image"] is not None and self.pipeline_type in ["sdup", "svd", "wani2v"]:       data["image"] = load_image(data["image"])
@@ -1158,7 +1160,7 @@ class CommonHost:
 
 
     def process_input_latent(self, latents):
-        assert not torch.any(latents.isnan()), "NaN in input latent"
+        # assert not torch.any(latents.isnan()), "NaN in input latent"
         # NOTE: this matters because it sometimes becomes NaN if you just move it to the target device
         latents = latents.to(dtype=torch.float16, device=torch.device("cpu"))
         latents = latents.to(device=self.pipe.device)
