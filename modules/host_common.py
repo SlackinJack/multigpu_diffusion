@@ -45,7 +45,6 @@ from diffusers import BitsAndBytesConfig as BitsAndBytesConfigD
 from diffusers import QuantoConfig as QuantoConfigD
 from diffusers import TorchAoConfig as TorchAoConfigD
 from diffusers.hooks import apply_group_offloading
-from diffusers.loaders.lora_conversion_utils import _convert_non_diffusers_lora_to_diffusers
 from diffusers.utils import load_image
 from diffusers.utils.torch_utils import randn_tensor
 from safetensors.torch import load_file
@@ -81,6 +80,11 @@ COMPEL_SUPPORTED_MODELS = ["sd1", "sd2", "sdxl"]
 
 from modules.scheduler_config import *
 from modules.utils import (
+    clean,
+    normalize_latent,
+    add_alpha_to_latent,
+    remove_alpha_from_latent,
+    get_torch_type,
     decode_b64_and_unpickle,
     pickle_and_encode_b64,
     convert_b64_to_nhwc_tensor,
@@ -90,9 +94,6 @@ from modules.utils import (
 )
 
 
-class HostShutdown(Exception): pass
-
-
 GENERIC_HOST_ARGS = {
     "port": int,
 }
@@ -100,6 +101,12 @@ GENERIC_HOST_ARGS = {
 
 GENERIC_HOST_ARGS_TOGGLES = [
 ]
+
+
+# these pipelines do not natively support denoising_start (uses a custom workaround in callback_on_step_end):
+DENOISING_START_WORKAROUND_PIPELINES = ["zimage"]
+# these pipelines do not support using torch deterministic algorithms for whatever reason (no workarounds):
+NON_DETERMINISTIC_PIPELINES = ["zimage"]
 
 
 def _get_transformer_module_names():
@@ -124,32 +131,6 @@ def _get_tokenizer_module_names():
 
 def get_is_image_model(model):
     return model not in ["ad", "svd", "wani2v", "want2v"]
-
-
-def clean():
-    torch.cuda.memory.empty_cache()
-    gc.collect()
-    return
-
-
-def get_torch_type(t):
-    match t:
-        case "bf16":    return torch.bfloat16
-        case "fp8":     return torch.float8_e4m3fn
-        case "fp16":    return torch.float16
-        case "fp32":    return torch.float32
-        case "int1":    return torch.uint1
-        case "int2":    return torch.uint2
-        case "int3":    return torch.uint3
-        case "int4":    return torch.uint4
-        case "int5":    return torch.uint5
-        case "int6":    return torch.uint6
-        case "int7":    return torch.uint7
-        case "int8":    return torch.uint8
-        case "int16":   return torch.uint16
-        case "int32":   return torch.uint32
-        case "bool":    return torch.bool
-        case _:         return None
 
 
 def get_quant_mapping(target, quantize_to):
@@ -258,30 +239,6 @@ def get_quantization_config(quantization_config):
     if quantize_misc is not None:           mappings.update(get_quant_mapping("misc", quantize_misc))
     if len(list(mappings.keys())) > 0:
         return PipelineQuantizationConfig(quant_mapping=mappings)
-
-
-def normalize_latent(x, max_val=3.0):
-    max_val = torch.tensor(max_val)
-    x = x.detach().clone()
-    for i in range(x.shape[0]):
-        x[[i], :] = torch.sqrt(max_val**2 - 1) * x[[i], :] / torch.sqrt(torch.add(x[[i], :]**2, max_val**2 - 1))
-        for chl in range(4):
-            if x[i, chl, :, :].std() > 1.0:
-                x[i, chl, :, :] /= x[i, chl, :, :].std()
-    return x
-
-
-def add_alpha_to_latent(latents):
-    if latents.shape[1] == 3:
-        alpha = torch.ones(latents.shape[0], 1, latents.shape[2], latents.shape[3], device=latents.device)
-        latents = torch.cat((latents, alpha), dim=1)
-    return latents
-
-
-def remove_alpha_from_latent(latents):
-    if latents.shape[1] == 4:
-        latents = latents[:, :3, :, :]
-    return latents
 
 
 class CommonHost:
@@ -452,10 +409,11 @@ class CommonHost:
                 # torch tweaks
                 torch.backends.cuda.sdp_kernel(enable_flash=True, enable_math=True, enable_mem_efficient=True, enable_cudnn=True)
                 # ensure deterministic
-                torch.use_deterministic_algorithms(True, warn_only=True)
-                torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = False
-                torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = False
-                torch.backends.cuda.allow_fp16_bf16_reduction_math_sdp(False)
+                if self.pipeline_type not in NON_DETERMINISTIC_PIPELINES:
+                    torch.use_deterministic_algorithms(True, warn_only=True)
+                    torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = False
+                    torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = False
+                    torch.backends.cuda.allow_fp16_bf16_reduction_math_sdp(False)
 
                 # update globals
                 self.vae_dtype      = torch.float16 if data["vae_fp16"] is not None and data["vae_fp16"] == True else None
@@ -966,8 +924,8 @@ class CommonHost:
             if hasattr(pipe_module, 'old_retrieve_timesteps'):
                 setattr(pipe_module, 'retrieve_timesteps', getattr(pipe_module, 'old_retrieve_timesteps'))
                 delattr(pipe_module, 'old_retrieve_timesteps')
-                if hasattr(pipe_module, 'new_retrieve_timesteps'):
-                    delattr(pipe_module, 'new_retrieve_timesteps')
+            if hasattr(pipe_module, 'new_retrieve_timesteps'):
+                delattr(pipe_module, 'new_retrieve_timesteps')
 
         if start is not None and start > 0 and pipe_module is not None:
             old_retrieve_timesteps = getattr(pipe_module, 'retrieve_timesteps', None)
@@ -990,22 +948,29 @@ class CommonHost:
         return
 
 
-    def setup_inference(self, data, can_use_compel=True, speedup_message=None, speedup_step=-1):
+    def setup_inference(self, data, can_use_compel=True, callbacks={}):
         # set scheduler
         if data["scheduler"] is not None:
             self.set_scheduler(data["scheduler"])
         elif self.default_scheduler is not None:
             self.pipe.scheduler = self.default_scheduler
 
-        self.set_scheduler_timesteps(data["denoising_start"])
+        if data["denoising_start"] is not None and data["denoising_start"] > 0:
+            if self.pipeline_type in DENOISING_START_WORKAROUND_PIPELINES:
+                # workaround for pipelines that do not support denoising_start
+                pass
+            else:
+                self.set_scheduler_timesteps(start=data["denoising_start"])
+        else:
+            self.set_scheduler_timesteps()
 
         if data["latent"] is not None:
             data["latent"] = self.process_input_latent(data["latent"])
 
         # progress bar
         def set_step_progress(pipe, index, timestep, callback_kwargs):
-            global get_scheduler_progressbar_offset_index
-            nonlocal self, data
+            global DENOISING_START_WORKAROUND_PIPELINES, get_scheduler_progressbar_offset_index
+            nonlocal self, callbacks, data
             # self.log(str(callback_kwargs["latents"]), rank_0_only=True)
             if torch.any(callback_kwargs["latents"].isnan()):
                 self.log("⁉️ NaN detected in latents - stopping generation")
@@ -1013,12 +978,27 @@ class CommonHost:
                 self.progress = 100
                 return callback_kwargs
             the_index = get_scheduler_progressbar_offset_index(pipe.scheduler, index)
+
+            # host callbacks
+            for k, v in callbacks.items():
+                if the_index == int(k):
+                    try:    v(callback_kwargs, data)
+                    except: pass
+
+            # denoising_start workaround
+            if data["latent"] is not None and self.pipeline_type in DENOISING_START_WORKAROUND_PIPELINES:
+                if the_index == data["denoising_start"]:
+                    self.log(f"ℹ️ Injecting latent at step {str(the_index)}")
+                    callback_kwargs["latents"] = data["latent"]
+                elif the_index < data["denoising_start"]:
+                    callback_kwargs["latents"] = torch.zeros_like(data["latent"])
+
+            # denoising_end
             if data["denoising_end"] is not None and the_index >= data["denoising_end"]:
                 self.log("ℹ️ Denoising end reached - stopping generation")
                 self.pipe._interrupt = True
+
             self.progress = int(the_index / data["steps"] * 100)
-            if the_index == speedup_step:
-                self.log(f"{str(speedup_message)}", rank_0_only=True)
             return callback_kwargs
 
         # compel
@@ -1163,7 +1143,10 @@ class CommonHost:
         # assert not torch.any(latents.isnan()), "NaN in input latent"
         # NOTE: this matters because it sometimes becomes NaN if you just move it to the target device
         latents = latents.to(dtype=torch.float16, device=torch.device("cpu"))
-        latents = latents.to(device=self.pipe.device)
+        if hasattr(self.pipe, "unet"):
+            latents = latents.to(device=self.pipe.unet.device)
+        else:
+            latents = latents.to(device=self.pipe.transformer.device)
         latents = add_alpha_to_latent(latents)
         return latents
 

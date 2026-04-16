@@ -2,6 +2,7 @@ import argparse
 import logging
 import os
 import signal
+import time
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
@@ -49,7 +50,6 @@ def __run_host():
     parser.add_argument("--model_n",        type=int,   default=2) # NOTE: if n > 4, you'll need to manually map your model in pipe_config.py
     parser.add_argument("--stride",         type=int,   default=1)
     parser.add_argument("--synced_steps",   type=int,   default=3)
-    # parser.add_argument("--synced_percent", type=float, default=None)
     parser.add_argument("--time_shift",     action="store_true")
     # generic
     for k, v in GENERIC_HOST_ARGS.items():  parser.add_argument(f"--{k}", type=v, default=None)
@@ -62,16 +62,22 @@ def __run_host():
         logging.getLogger('werkzeug').disabled = True
         app.run(host="localhost", port=args.port)
     else:
-        # TODO: would be nice to make this non-blocking
         while True:
             base.log(f"⏳ Waiting for tasks")
             params = [{"stop": True}]
+            # TODO: would be nice to make this non-blocking
             dist.broadcast_object_list(params, src=0)
             if params[0].get("stop") is not None:
                 base.log("🛑 Received exit signal - shutting down")
                 return
-            base.log(f"📋 Received task")
-            __handle_request_parallel(*params)
+            elif params[0].get("sleep") is not None and params[0].get("time") is not None:
+                t = params[0].get("time")
+                base.log(f"💤 Received sleep signal - pausing for {t} seconds")
+                time.sleep(int(t))
+                base.log("⏰ Sleep finished")
+            else:
+                base.log(f"📋 Received task")
+                __handle_request_parallel(*params)
     return
 
 
@@ -93,6 +99,8 @@ def handle_path(path):
             return __generate_image(request.json)
         case "offload":
             return __offload_modules()
+        case "sleep":
+            return __handle_sleep(request.json)
         case "close":
             base.log("🛑 Received exit signal - shutting down")
             dist.broadcast_object_list([{"stop": True}], src=0)
@@ -127,6 +135,11 @@ def __generate_image(data):
     return jsonify(response)
 
 
+def __handle_sleep(data):
+    dist.broadcast_object_list([data], src=0)
+    return "", 200
+
+
 def __offload_modules():
     dist.broadcast_object_list([{"offload": True}], src=0)
     return __offload_modules_parallel()
@@ -144,9 +157,9 @@ def __move_pipe_module(module, dev):
         t_device = torch.device(dev)
         if c_device != t_device:
             vars(base.pipe)[module] = mod.to(device=t_device)
-            if "cpu" in dev:
+            if "cpu" in str(dev):
                 vars(base.pipe)[module] = mod.cpu()
-            elif "cuda" in dev:
+            elif "cuda" in str(dev):
                 torch.cuda.set_device(tar_device)
                 torch.cuda.synchronize()
             return 0
@@ -243,11 +256,29 @@ def __generate_image_parallel(data):
         __move_pipe(f"cuda:{base.local_rank}")
         torch.cuda.reset_peak_memory_stats()
         warmup_steps = asyncdiff_config.get("synced_steps")
-        async_diff.reset_state(warm_up=warmup_steps)
+        # async_diff.reset_state(warm_up=warmup_steps)
         base.progress = 0
 
+        def reset(c, d):
+            nonlocal warmup_steps
+            async_diff.reset_state(warm_up=warmup_steps)
+            return
+
+        def complete(c, d):
+            base.log("🚀 AsyncDiff warmup completed", rank_0_only=True)
+            return
+
         # inference kwargs
-        kwargs = base.setup_inference(data, can_use_compel=True, speedup_message="🚀 AsyncDiff warmup completed", speedup_step=warmup_steps)
+        callbacks = {}
+        start = data.get("denoising_start", 0)
+        if start > 0:
+            async_diff.reset_state(warm_up=99999)
+            callbacks[start] = reset
+            callbacks[start+warmup_steps] = complete
+        else:
+            async_diff.reset_state(warm_up=warmup_steps)
+            callbacks[warmup_steps] = complete
+        kwargs = base.setup_inference(data, can_use_compel=True, callbacks=callbacks)
 
         # inference
         dist.barrier()

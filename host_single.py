@@ -59,6 +59,8 @@ def handle_path(path):
             return __generate_image_parallel(request.json)
         case "offload":
             return __offload_modules_parallel()
+        case "sleep":
+            return "Operation not supported by this host", 500
         case "close":
             base.log("🛑 Received exit signal - shutting down")
             base.close_pipeline()

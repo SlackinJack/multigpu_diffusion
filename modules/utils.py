@@ -1,10 +1,61 @@
 import base64
+import gc
 import json
 import pickle
 import torch
 
 
 from torchvision.transforms import ToPILImage, ToTensor
+
+
+def get_torch_type(t):
+    match t:
+        case "bf16":    return torch.bfloat16
+        case "fp8":     return torch.float8_e4m3fn
+        case "fp16":    return torch.float16
+        case "fp32":    return torch.float32
+        case "int1":    return torch.uint1
+        case "int2":    return torch.uint2
+        case "int3":    return torch.uint3
+        case "int4":    return torch.uint4
+        case "int5":    return torch.uint5
+        case "int6":    return torch.uint6
+        case "int7":    return torch.uint7
+        case "int8":    return torch.uint8
+        case "int16":   return torch.uint16
+        case "int32":   return torch.uint32
+        case "bool":    return torch.bool
+        case _:         return None
+
+
+def clean():
+    torch.cuda.memory.empty_cache()
+    gc.collect()
+    return
+
+
+def normalize_latent(x, max_val=3.0):
+    max_val = torch.tensor(max_val)
+    x = x.detach().clone()
+    for i in range(x.shape[0]):
+        x[[i], :] = torch.sqrt(max_val**2 - 1) * x[[i], :] / torch.sqrt(torch.add(x[[i], :]**2, max_val**2 - 1))
+        for chl in range(4):
+            if x[i, chl, :, :].std() > 1.0:
+                x[i, chl, :, :] /= x[i, chl, :, :].std()
+    return x
+
+
+def add_alpha_to_latent(latents):
+    if latents.shape[1] == 3:
+        alpha = torch.ones(latents.shape[0], 1, latents.shape[2], latents.shape[3], device=latents.device)
+        latents = torch.cat((latents, alpha), dim=1)
+    return latents
+
+
+def remove_alpha_from_latent(latents):
+    if latents.shape[1] == 4:
+        latents = latents[:, :3, :, :]
+    return latents
 
 
 def decode_b64_and_unpickle(b64):

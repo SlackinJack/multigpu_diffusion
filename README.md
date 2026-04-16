@@ -3,6 +3,10 @@
 Python Flask hosts for multi-GPU Diffusion inferencing solutions.
 
 
+## Notes:
+- Run `setup.sh` before use.
+
+
 ## Usage:
 - Check out [multigpu_diffusion_comfyui](https://github.com/SlackinJack/multigpu_diffusion_comfyui) for running implementation(s).
 
