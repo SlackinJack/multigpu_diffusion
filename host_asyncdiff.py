@@ -14,7 +14,6 @@ from AsyncDiff.asyncdiff.async_animate import AsyncDiff as AsyncDiffAnimateDiff
 from AsyncDiff.asyncdiff.async_flux import AsyncDiff as AsyncDiffFlux
 from AsyncDiff.asyncdiff.async_sd import AsyncDiff as AsyncDiffStableDiffusion
 from AsyncDiff.asyncdiff.async_sd3 import AsyncDiff as AsyncDiffStableDiffusion3
-from AsyncDiff.asyncdiff.async_wan import AsyncDiff as AsyncDiffWan
 from AsyncDiff.asyncdiff.async_zimage import AsyncDiff as AsyncDiffZImage
 
 
@@ -271,7 +270,7 @@ def __generate_image_parallel(data):
         # inference kwargs
         callbacks = {}
         start = data.get("denoising_start", 0)
-        if start > 0:
+        if start is not None and start > 0:
             async_diff.reset_state(warm_up=99999)
             callbacks[start] = reset
             callbacks[start+warmup_steps] = complete

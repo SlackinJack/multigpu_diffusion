@@ -1,11 +1,37 @@
 import base64
 import gc
+import inspect
 import json
 import pickle
 import torch
 
 
 from torchvision.transforms import ToPILImage, ToTensor
+
+
+def clean_override_function(klass, target_func_name):
+    module = inspect.getmodule(klass)
+    if module is not None:
+        if hasattr(module, f'old_{target_func_name}'):
+            setattr(module, target_func_name, getattr(module, f'old_{target_func_name}'))
+            delattr(module, f'old_{target_func_name}')
+        if hasattr(module, f'new_{target_func_name}'):
+            delattr(module, f'new_{target_func_name}')
+    return
+
+
+def override_function(klass, target_func_name, func):
+    module = inspect.getmodule(klass)
+    clean_override_function(klass, target_func_name)
+    old_func = getattr(module, target_func_name, None)
+    setattr(module, f'old_{target_func_name}', old_func)
+    setattr(module, target_func_name, func)
+    return
+
+
+def get_function_from_class(klass, target_func_name):
+    module = inspect.getmodule(klass)
+    return getattr(module, target_func_name, None)
 
 
 def get_torch_type(t):

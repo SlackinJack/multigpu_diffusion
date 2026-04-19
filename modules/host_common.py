@@ -1,5 +1,4 @@
 import gc
-import inspect
 import json
 import logging
 import numpy
@@ -36,8 +35,6 @@ from diffusers import (
     StableDiffusionXLControlNetPipeline,
     StableDiffusionXLPipeline,
     StableVideoDiffusionPipeline,
-    WanPipeline,
-    WanImageToVideoPipeline,
     ZImagePipeline,
     # ZImageControlNetPipeline,
 )
@@ -81,6 +78,9 @@ COMPEL_SUPPORTED_MODELS = ["sd1", "sd2", "sdxl"]
 from modules.scheduler_config import *
 from modules.utils import (
     clean,
+    clean_override_function,
+    get_function_from_class,
+    override_function,
     normalize_latent,
     add_alpha_to_latent,
     remove_alpha_from_latent,
@@ -130,7 +130,7 @@ def _get_tokenizer_module_names():
 
 
 def get_is_image_model(model):
-    return model not in ["ad", "svd", "wani2v", "want2v"]
+    return model not in ["ad", "svd"]
 
 
 def get_quant_mapping(target, quantize_to):
@@ -453,8 +453,6 @@ class CommonHost:
                         match self.pipeline_type:
                             case "sdxl":    kwargs["text_encoder"] = self.load_encoder(data["text_encoder"], "CLIPTextModel")
                             case "sdup":    kwargs["text_encoder"] = self.load_encoder(data["text_encoder"], "CLIPTextModel")
-                            case "wani2v":  kwargs["text_encoder"] = self.load_encoder(data["text_encoder"], "UMT5EncoderModel")
-                            case "want2v":  kwargs["text_encoder"] = self.load_encoder(data["text_encoder"], "UMT5EncoderModel")
                             case "zimage":  kwargs["text_encoder"] = self.load_encoder(data["text_encoder"], "Qwen3ForCausalLM")
                     if data["text_encoder_2"] is not None:
                         match self.pipeline_type:
@@ -495,10 +493,6 @@ class CommonHost:
                         PipelineClass = StableDiffusionXLControlNetPipeline if data["control_net"] is not None else StableDiffusionXLPipeline
                     case "svd":
                         PipelineClass = StableVideoDiffusionPipeline
-                    case "want2v":
-                        PipelineClass = WanPipeline
-                    case "wani2v":
-                        PipelineClass = WanImageToVideoPipeline
                     case "zimage":
                         # PipelineClass = ZImageControlNetPipeline if data["control_net"] is not None else ZImagePipeline
                         PipelineClass = ZImagePipeline
@@ -678,7 +672,7 @@ class CommonHost:
                     if compile_options is not None:             compiler_config["options"] = json.loads(compile_options)
 
                     if compile_transformer:
-                        if self.pipeline_type in ["flux", "sd3", "wani2v", "want2v", "zimage"]:
+                        if self.pipeline_type in ["flux", "sd3", "zimage"]:
                             self.compile_helper("transformer", compiler_config)
                         else:
                             self.compile_helper("unet", compiler_config)
@@ -885,7 +879,7 @@ class CommonHost:
         assert not (data["image"] is None and data["positive"] is None and data["positive_embeds"] is None), "No input provided"
         assert not (data["positive"] is not None and data["positive_embeds"] is not None), "Provide only one positive input"
         assert not (data["negative"] is not None and data["negative_embeds"] is not None), "Provide only one negative input"
-        assert not (data["image"] is None and self.pipeline_type in ["sdup", "svd", "wani2v"]), "No image provided for an image pipeline"
+        assert not (data["image"] is None and self.pipeline_type in ["sdup", "svd"]), "No image provided for an image pipeline"
         assert not (data["ip_image"] is None and self.applied.get("ip_adapter") is not None), "No IPAdapter image provided for a IPAdapter-loaded pipeline"
         assert not (data["control_image"] is None and self.applied.get("control_net") is not None), "No ConstrolNet image provided for a ControlNet-loaded pipeline"
 
@@ -901,7 +895,7 @@ class CommonHost:
         if data["denoising_end"] is not None and data["denoising_end"] > data["steps"]:         data["denoising_end"]   = data["steps"]
 
         # load images
-        if data["image"] is not None and self.pipeline_type in ["sdup", "svd", "wani2v"]:       data["image"] = load_image(data["image"])
+        if data["image"] is not None and self.pipeline_type in ["sdup", "svd"]:                 data["image"] = load_image(data["image"])
         if data["ip_image"] is not None and self.applied.get("ip_adapter") is not None:         data["ip_image"] = load_image(data["ip_image"])
         if data["control_image"] is not None and self.applied.get("control_net") is not None:   data["control_image"] = load_image(data["control_image"])
 
@@ -919,18 +913,9 @@ class CommonHost:
 
 
     def set_scheduler_timesteps(self, start=0):
-        pipe_module = inspect.getmodule(self.pipe.__class__)
-        if pipe_module is not None:
-            if hasattr(pipe_module, 'old_retrieve_timesteps'):
-                setattr(pipe_module, 'retrieve_timesteps', getattr(pipe_module, 'old_retrieve_timesteps'))
-                delattr(pipe_module, 'old_retrieve_timesteps')
-            if hasattr(pipe_module, 'new_retrieve_timesteps'):
-                delattr(pipe_module, 'new_retrieve_timesteps')
-
-        if start is not None and start > 0 and pipe_module is not None:
-            old_retrieve_timesteps = getattr(pipe_module, 'retrieve_timesteps', None)
-            setattr(pipe_module, 'old_retrieve_timesteps', old_retrieve_timesteps)
-
+        clean_override_function(self.pipe.__class__, 'retrieve_timesteps')
+        if start is not None and start > 0:
+            old_retrieve_timesteps = get_function_from_class(self.pipe.__class__, 'retrieve_timesteps')
             def new_retrieve_timesteps(*args, **kwargs):
                 nonlocal start
                 result = lambda: old_retrieve_timesteps(*args, **kwargs)
@@ -944,7 +929,7 @@ class CommonHost:
 
                     # self.log("New timesteps: " + str(timesteps), rank_0_only=True)
                 return timesteps, num_inference_steps - start
-            setattr(pipe_module, 'retrieve_timesteps', new_retrieve_timesteps)
+            override_function(self.pipe.__class__, 'retrieve_timesteps', new_retrieve_timesteps)
         return
 
 
@@ -963,6 +948,18 @@ class CommonHost:
                 self.set_scheduler_timesteps(start=data["denoising_start"])
         else:
             self.set_scheduler_timesteps()
+
+        # dirty patch zimage for heun
+        if self.pipeline_type == "zimage" and json.loads(data["scheduler"])["scheduler"] == "fm_heun":
+            # NOTE: copied from above - zimage uses latent inject when start>0, this will be fine...for now
+            clean_override_function(self.pipe.__class__, 'retrieve_timesteps')
+            old_retrieve_timesteps = get_function_from_class(self.pipe.__class__, 'retrieve_timesteps')
+            def new_retrieve_timesteps(*args, **kwargs):
+                del kwargs["mu"]
+                result = lambda: old_retrieve_timesteps(*args, **kwargs)
+                timesteps, num_inference_steps = result()
+                return timesteps, num_inference_steps
+            override_function(self.pipe.__class__, 'retrieve_timesteps', new_retrieve_timesteps)
 
         if data["latent"] is not None:
             data["latent"] = self.process_input_latent(data["latent"])
@@ -1064,23 +1061,6 @@ class CommonHost:
                 if data["image"] is not None:                   kwargs["image"]                 = data["image"]
                 if data["height"] is not None:                  kwargs["height"]                = data["height"]
                 if data["width"] is not None:                   kwargs["width"]                 = data["width"]
-            case "want2v": # TODO: complete
-                kwargs["output_type"]                           = "pil"
-                kwargs["guidance_scale"]                        = data["cfg"]
-                if data["height"] is not None:                  kwargs["height"]                = data["height"]
-                if data["width"] is not None:                   kwargs["width"]                 = data["width"]
-                if data["positive"] is not None:                kwargs["prompt"]                = data["positive"]
-                if data["negative"] is not None:                kwargs["negative_prompt"]       = data["negative"]
-                if data["frames"] is not None:                  kwargs["num_frames"]            = data["frames"]
-            case "wani2v": # TODO: complete
-                kwargs["output_type"]                           = "pil"
-                kwargs["guidance_scale"]                        = data["cfg"]
-                if data["image"] is not None:                   kwargs["image"]                 = data["image"]
-                if data["height"] is not None:                  kwargs["height"]                = data["height"]
-                if data["width"] is not None:                   kwargs["width"]                 = data["width"]
-                if data["positive"] is not None:                kwargs["prompt"]                = data["positive"]
-                if data["negative"] is not None:                kwargs["negative_prompt"]       = data["negative"]
-                if data["frames"] is not None:                  kwargs["num_frames"]            = data["frames"]
             case "zimage": # TODO: complete
                 kwargs["output_type"]                           = "latent"
                 kwargs["guidance_scale"]                        = data["cfg"]

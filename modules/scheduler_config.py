@@ -13,6 +13,7 @@ from diffusers.schedulers import (
     EulerAncestralDiscreteScheduler,
     EulerDiscreteScheduler,
     FlowMatchEulerDiscreteScheduler,
+    FlowMatchHeunDiscreteScheduler,
     HeunDiscreteScheduler,
     IPNDMScheduler,
     LMSDiscreteScheduler,
@@ -54,6 +55,7 @@ def get_scheduler_class(scheduler_name):
 
         # flowmatch
         case "fm_euler":        return FlowMatchEulerDiscreteScheduler
+        case "fm_heun":         return FlowMatchHeunDiscreteScheduler
 
         case _:                 raise NotImplementedError
 
@@ -82,6 +84,7 @@ def get_scheduler_name(scheduler):
 
         # flowmatch
         case "FlowMatchEulerDiscreteScheduler": return "fm_euler"
+        case "FlowMatchHeunDiscreteScheduler":  return "fm_heun"
 
         case _:                                 return None
 
@@ -101,7 +104,7 @@ def get_scheduler_supports_setting_sigmas(scheduler):
 
 
 def get_scheduler_progressbar_offset_index(scheduler, index):
-    schedulers = { "heun": 0.5 }
+    schedulers = { "heun": 0.5, "fm_heun": 0.5 }
     s = get_scheduler_name(scheduler)
     if s is not None and s in schedulers.keys(): return index * schedulers[s]
     return index
