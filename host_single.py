@@ -3,6 +3,7 @@ import logging
 import os
 import signal
 import torch
+from DeepCache import DeepCacheSDHelper
 from flask import Flask, request, jsonify
 
 
@@ -28,6 +29,10 @@ args = None
 def __run_host():
     global args, base
     parser = argparse.ArgumentParser()
+    # single
+    parser.add_argument("--deep_cache",             action="store_true")
+    parser.add_argument("--deep_cache_interval",    type=int,               default=3)
+    parser.add_argument("--deep_cache_id",          type=int,               default=0)
     # generic
     for k, v in GENERIC_HOST_ARGS.items():  parser.add_argument(f"--{k}", type=v, default=None)
     for e in GENERIC_HOST_ARGS_TOGGLES:     parser.add_argument(f"--{e}", action="store_true")
@@ -167,8 +172,17 @@ def __generate_image_parallel(data):
         kwargs = base.setup_inference(data, can_use_compel=True)
 
         # inference
+        can_use_deep_cache = base.pipeline_type in ["sd1", "sd2", "sdxl"] and args.deep_cache == True
         with torch.inference_mode():
+            if can_use_deep_cache:
+                helper = DeepCacheSDHelper(pipe=base.pipe)
+                helper.set_params(cache_interval=args.deep_cache_interval, cache_branch_id=args.deep_cache_id)
+                helper.enable()
+                base.log("ℹ️ DeepCache enabled")
             output = base.pipe(**kwargs)
+            if can_use_deep_cache:
+                helper.disable()
+                base.log("ℹ️ DeepCache disabled")
 
         # clean up
         clean()

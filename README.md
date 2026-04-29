@@ -1,6 +1,7 @@
 # multigpu_diffusion
 
 Python Flask hosts for multi-GPU Diffusion inferencing solutions.
+(Uses HuggingFace Diffusers library.)
 
 
 ## Notes:
@@ -8,7 +9,8 @@ Python Flask hosts for multi-GPU Diffusion inferencing solutions.
 
 
 ## Usage:
-- Check out [multigpu_diffusion_comfyui](https://github.com/SlackinJack/multigpu_diffusion_comfyui) for running implementation(s).
+Check out the following repos:
+- [multigpu_diffusion_comfyui](https://github.com/SlackinJack/multigpu_diffusion_comfyui) 
 
 
 ## Additional Resources:
@@ -16,5 +18,6 @@ Python Flask hosts for multi-GPU Diffusion inferencing solutions.
 
 
 ## Test Environment:
-- 2x Intel Xeon E5-2696v4
 - 4x Nvidia Tesla T4
+- Ubuntu Server 26.04
+- Python 3.14.4

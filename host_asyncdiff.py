@@ -14,6 +14,7 @@ from AsyncDiff.asyncdiff.async_animate import AsyncDiff as AsyncDiffAnimateDiff
 from AsyncDiff.asyncdiff.async_flux import AsyncDiff as AsyncDiffFlux
 from AsyncDiff.asyncdiff.async_sd import AsyncDiff as AsyncDiffStableDiffusion
 from AsyncDiff.asyncdiff.async_sd3 import AsyncDiff as AsyncDiffStableDiffusion3
+from AsyncDiff.asyncdiff.async_wan import AsyncDiff as AsyncDiffWan
 from AsyncDiff.asyncdiff.async_zimage import AsyncDiff as AsyncDiffZImage
 
 
@@ -49,7 +50,8 @@ def __run_host():
     parser.add_argument("--model_n",        type=int,   default=2) # NOTE: if n > 4, you'll need to manually map your model in pipe_config.py
     parser.add_argument("--stride",         type=int,   default=1)
     parser.add_argument("--synced_steps",   type=int,   default=3)
-    parser.add_argument("--time_shift",     action="store_true")
+    parser.add_argument("--time_shift",     type=int,   default=0)
+    parser.add_argument("--cache_step",     type=int,   default=1)
     # generic
     for k, v in GENERIC_HOST_ARGS.items():  parser.add_argument(f"--{k}", type=v, default=None)
     for e in GENERIC_HOST_ARGS_TOGGLES:     parser.add_argument(f"--{e}", action="store_true")
@@ -241,7 +243,8 @@ def __apply_pipeline_parallel(data):
                 base.pipeline_type,
                 model_n=asyncdiff_config.get("model_n"),
                 stride=asyncdiff_config.get("stride"),
-                time_shift=asyncdiff_config.get("time_shift")
+                time_shift=asyncdiff_config.get("time_shift"),
+                cache_step=asyncdiff_config.get("cache_step"),
             )
         return result
 
@@ -269,14 +272,8 @@ def __generate_image_parallel(data):
 
         # inference kwargs
         callbacks = {}
-        start = data.get("denoising_start", 0)
-        if start is not None and start > 0:
-            async_diff.reset_state(warm_up=99999)
-            callbacks[start] = reset
-            callbacks[start+warmup_steps] = complete
-        else:
-            async_diff.reset_state(warm_up=warmup_steps)
-            callbacks[warmup_steps] = complete
+        async_diff.reset_state(warm_up=warmup_steps)
+        callbacks[warmup_steps] = complete
         kwargs = base.setup_inference(data, can_use_compel=True, callbacks=callbacks)
 
         # inference
