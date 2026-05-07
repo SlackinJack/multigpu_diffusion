@@ -5,12 +5,15 @@ Python Flask hosts for multi-GPU Diffusion inferencing solutions.
 
 
 ## Notes:
-- Run `setup.sh` before use.
+- Windows and macOS are (probably) not supported.
+- This repo mainly exists for [multigpu_diffusion_comfyui](https://github.com/SlackinJack/multigpu_diffusion_comfyui), which provides the nodes to run everything here.
 
 
-## Usage:
-Check out the following repos:
-- [multigpu_diffusion_comfyui](https://github.com/SlackinJack/multigpu_diffusion_comfyui) 
+## Manual Usage:
+- (Review and) run `setup.sh`. If you want to use a venv, ensure that it is active before running.
+- For AsyncDiff host, run `torchrun --master_port={master_port} --nproc_per_node={n_gpus} host_asyncdiff.py --port={port}`
+- For other hosts, run `python3 --host_{name}.py --port={port}`
+- To interact with the hosts, GET/POST to localhost:{port}/{endpoint}. You can find the endpoints at each host's handle_path().
 
 
 ## Additional Resources:

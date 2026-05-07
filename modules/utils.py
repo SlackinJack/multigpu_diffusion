@@ -20,11 +20,12 @@ def clean_override_function(klass, target_func_name):
     return
 
 
-def override_function(klass, target_func_name, func):
+def override_function(klass, target_func_name, func, clean_old_func=True, old_func_new_name=None):
     module = inspect.getmodule(klass)
-    clean_override_function(klass, target_func_name)
+    if clean_old_func == True:      clean_override_function(klass, target_func_name)
     old_func = getattr(module, target_func_name, None)
-    setattr(module, f'old_{target_func_name}', old_func)
+    if old_func_new_name is None:   setattr(module, f'old_{target_func_name}', old_func)
+    else:                           setattr(module, old_func_new_name, old_func)
     setattr(module, target_func_name, func)
     return
 

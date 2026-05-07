@@ -261,12 +261,7 @@ def __generate_image_parallel(data):
         # async_diff.reset_state(warm_up=warmup_steps)
         base.progress = 0
 
-        def reset(c, d):
-            nonlocal warmup_steps
-            async_diff.reset_state(warm_up=warmup_steps)
-            return
-
-        def complete(c, d):
+        def complete(data, index, timestep, callback_kwargs):
             base.log("🚀 AsyncDiff warmup completed", rank_0_only=True)
             return
 

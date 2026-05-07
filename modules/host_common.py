@@ -35,6 +35,8 @@ from diffusers import (
     StableDiffusionXLControlNetPipeline,
     StableDiffusionXLPipeline,
     StableVideoDiffusionPipeline,
+    WanImageToVideoPipeline,
+    WanPipeline,
     ZImagePipeline,
     # ZImageControlNetPipeline,
 )
@@ -986,7 +988,7 @@ class CommonHost:
             # host callbacks
             for k, v in callbacks.items():
                 if the_index == int(k):
-                    try:    v(callback_kwargs, data)
+                    try:    v(data, index, timestep, callback_kwargs)
                     except: pass
 
             # denoising_start workaround
