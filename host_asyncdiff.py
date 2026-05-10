@@ -59,25 +59,25 @@ def __run_host():
 
     torch._logging.set_logs(all=logging.CRITICAL)
     if base.local_rank == 0:
-        base.log("ℹ️ Starting Flask host on rank 0", rank_0_only=True)
+        base.log("ℹ️ Starting Flask host on rank 0")
         logging.getLogger('werkzeug').disabled = True
         app.run(host="localhost", port=args.port)
     else:
         while True:
-            base.log(f"⏳ Waiting for tasks")
+            base.log(f"⏳ Waiting for tasks", rank_0_only=False)
             params = [{"stop": True}]
             # TODO: would be nice to make this non-blocking
             dist.broadcast_object_list(params, src=0)
             if params[0].get("stop") is not None:
-                base.log("🛑 Received exit signal - shutting down")
+                base.log("🛑 Received exit signal - shutting down", rank_0_only=False)
                 return
             elif params[0].get("sleep") is not None and params[0].get("time") is not None:
                 t = params[0].get("time")
-                base.log(f"💤 Received sleep signal - pausing for {t} seconds")
+                base.log(f"💤 Received sleep signal - pausing for {t} seconds", rank_0_only=False)
                 time.sleep(int(t))
-                base.log("⏰ Sleep finished")
+                base.log("⏰ Sleep finished", rank_0_only=False)
             else:
-                base.log(f"📋 Received task")
+                base.log(f"📋 Received task", rank_0_only=False)
                 __handle_request_parallel(*params)
     return
 
@@ -103,7 +103,7 @@ def handle_path(path):
         case "sleep":
             return __handle_sleep(request.json)
         case "close":
-            base.log("🛑 Received exit signal - shutting down")
+            base.log("🛑 Received exit signal - shutting down", rank_0_only=False)
             dist.broadcast_object_list([{"stop": True}], src=0)
             base.close_pipeline()
             os.kill(os.getpid(), signal.SIGTERM)
@@ -214,7 +214,7 @@ def __move_pipe(device):
         Moved to {device}: {str(moved)}
         Not moved to {device}: {str(not_moved)}
         Already on {device}: {str(alr_moved)}"""
-    base.log(msg, rank_0_only=True)
+    base.log(msg)
     return msg, 200
 
 
@@ -246,6 +246,8 @@ def __apply_pipeline_parallel(data):
                 time_shift=asyncdiff_config.get("time_shift"),
                 cache_step=asyncdiff_config.get("cache_step"),
             )
+            if asyncdiff_config.get("cache_step") is not None and asyncdiff_config.get("cache_step") > 1:
+                base.log("⚠️ cache_step enabled - this may severely degrade image quality if not tuned correctly")
         return result
 
 
@@ -262,7 +264,7 @@ def __generate_image_parallel(data):
         base.progress = 0
 
         def complete(data, index, timestep, callback_kwargs):
-            base.log("🚀 AsyncDiff warmup completed", rank_0_only=True)
+            base.log("🚀 AsyncDiff warmup completed")
             return
 
         # inference kwargs
@@ -285,7 +287,7 @@ def __generate_image_parallel(data):
         # output
         if base.local_rank == 0:
             if output is not None:
-                if get_is_image_model(base.pipeline_type):
+                if base.is_image_model:
                     if base.pipeline_type in ["sdup"]:
                         output = output.images[0]
                     else:

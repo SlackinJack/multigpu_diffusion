@@ -1,4 +1,5 @@
 import argparse
+import cache_dit
 import logging
 import os
 import signal
@@ -33,13 +34,14 @@ def __run_host():
     parser.add_argument("--deep_cache",             action="store_true")
     parser.add_argument("--deep_cache_interval",    type=int,               default=3)
     parser.add_argument("--deep_cache_id",          type=int,               default=0)
+    parser.add_argument("--cache_dit",              action="store_true")
     # generic
     for k, v in GENERIC_HOST_ARGS.items():  parser.add_argument(f"--{k}", type=v, default=None)
     for e in GENERIC_HOST_ARGS_TOGGLES:     parser.add_argument(f"--{e}", action="store_true")
     args = parser.parse_args()
 
     torch._logging.set_logs(all=logging.CRITICAL)
-    base.log("ℹ️ Starting Flask host")
+    base.log("ℹ️ Starting Flask host", rank_0_only=False)
     logging.getLogger('werkzeug').disabled = True
     app.run(host="localhost", port=args.port)
     return
@@ -67,7 +69,7 @@ def handle_path(path):
         case "sleep":
             return "Operation not supported by this host", 500
         case "close":
-            base.log("🛑 Received exit signal - shutting down")
+            base.log("🛑 Received exit signal - shutting down", rank_0_only=False)
             base.close_pipeline()
             os.kill(os.getpid(), signal.SIGTERM)
             raise HostShutdown
@@ -143,7 +145,7 @@ def __move_pipe(device):
         Moved to {device}: {str(moved)}
         Not moved to {device}: {str(not_moved)}
         Already on {device}: {str(alr_moved)}"""
-    base.log(msg, rank_0_only=True)
+    base.log(msg)
     return msg, 200
 
 
@@ -173,16 +175,17 @@ def __generate_image_parallel(data):
 
         # inference
         can_use_deep_cache = base.pipeline_type in ["sd1", "sd2", "sdxl"] and args.deep_cache == True
+        can_use_cache_dit = base.can_use_cachedit and args.cache_dit == True
         with torch.inference_mode():
             if can_use_deep_cache:
                 helper = DeepCacheSDHelper(pipe=base.pipe)
                 helper.set_params(cache_interval=args.deep_cache_interval, cache_branch_id=args.deep_cache_id)
                 helper.enable()
-                base.log("ℹ️ DeepCache enabled")
+                base.log("ℹ️ DeepCache enabled", rank_0_only=False)
             output = base.pipe(**kwargs)
             if can_use_deep_cache:
                 helper.disable()
-                base.log("ℹ️ DeepCache disabled")
+                base.log("ℹ️ DeepCache disabled", rank_0_only=False)
 
         # clean up
         clean()
@@ -191,7 +194,7 @@ def __generate_image_parallel(data):
 
         # output
         if output is not None:
-            if get_is_image_model(base.pipeline_type):
+            if base.is_image_model:
                 if base.pipeline_type in ["sdup"]:
                     output = output.images[0]
                 else:

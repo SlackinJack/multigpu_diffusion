@@ -131,10 +131,6 @@ def _get_tokenizer_module_names():
     return ["tokenizer", "tokenizer_2"]
 
 
-def get_is_image_model(model):
-    return model not in ["ad", "svd", "wani2v", "want2v"]
-
-
 def get_quant_mapping(target, quantize_to):
     out = {}
     config = None
@@ -256,6 +252,9 @@ class CommonHost:
         self.default_scheduler = None
         self.adapter_names = None
         self.applied = None
+        self.is_image_model = True
+        self.can_use_deepcache = False
+        self.can_use_cachedit = False
 
 
     def get_initialized_flask(self):
@@ -283,7 +282,7 @@ class CommonHost:
         return
 
 
-    def log(self, text, rank_0_only=False):
+    def log(self, text, rank_0_only=True):
         if rank_0_only == True and self.local_rank != 0: return
         self.logger.info(text)
         # print(f"[Rank {str(self.local_rank)}]: {text}")
@@ -313,8 +312,8 @@ class CommonHost:
     def set_scheduler(self, scheduler_config):
         params = json.loads(scheduler_config)
         self.pipe.scheduler = get_scheduler(params, {})
-        self.pipe.scheduler.set_timesteps(self.pipe.scheduler.config.num_train_timesteps)
         self.pipe.scheduler = get_scheduler(params, self.pipe.scheduler.config)
+        self.pipe.scheduler.set_timesteps(self.pipe.scheduler.config.num_train_timesteps)
         return
 
 
@@ -370,7 +369,7 @@ class CommonHost:
             return "", 200
         else:
             try:
-                self.log(f"⚙️ Initializing pipeline")
+                self.log(f"⚙️ Initializing pipeline", rank_0_only=False)
 
                 # reset current
                 self.close_pipeline()
@@ -467,27 +466,42 @@ class CommonHost:
                 match self.pipeline_type:
                     case "ad":
                         PipelineClass = AnimateDiffControlNetPipeline if data["control_net"] is not None else AnimateDiffPipeline
+                        self.is_image_model = False
+                        self.can_use_deepcache = True # TODO: test
                     case "flux":
                         PipelineClass = FluxControlNetPipeline if data["control_net"] is not None else FluxPipeline
+                        self.can_use_cachedit = True
                     case "sd1":
                         PipelineClass = StableDiffusionControlNetPipeline if data["control_net"] is not None else StableDiffusionPipeline
+                        self.can_use_deepcache = True
                     case "sd2":
                         PipelineClass = StableDiffusionControlNetPipeline if data["control_net"] is not None else StableDiffusionPipeline
+                        self.can_use_deepcache = True
                     case "sd3":
                         PipelineClass = StableDiffusion3ControlNetPipeline if data["control_net"] is not None else StableDiffusion3Pipeline
+                        self.can_use_cachedit = True
                     case "sdup":
                         PipelineClass = StableDiffusionUpscalePipeline
+                        self.can_use_deepcache = True # TODO: test
                     case "sdxl":
                         PipelineClass = StableDiffusionXLControlNetPipeline if data["control_net"] is not None else StableDiffusionXLPipeline
+                        self.can_use_deepcache = True
                     case "svd":
                         PipelineClass = StableVideoDiffusionPipeline
+                        self.is_image_model = False
+                        self.can_use_deepcache = True # TODO: test
                     case "want2v":
                         PipelineClass = WanPipeline
+                        self.is_image_model = False
+                        self.can_use_cachedit = True
                     case "wani2v":
                         PipelineClass = WanImageToVideoPipeline
+                        self.is_image_model = False
+                        self.can_use_cachedit = True # TODO: test
                     case "zimage":
                         # PipelineClass = ZImageControlNetPipeline if data["control_net"] is not None else ZImagePipeline
                         PipelineClass = ZImagePipeline
+                        self.can_use_cachedit = True
                     case _: raise NotImplementedError
                 self.pipe = PipelineClass.from_pretrained(data["checkpoint"]["checkpoint"], **kwargs)
                 del kwargs
@@ -495,8 +509,8 @@ class CommonHost:
                 if data["attn_backend_config"] is not None and data["attn_backend_config"].get("backend") is not None:
                     if self.get_is_transformer_model_type():    self.pipe.transformer.set_attention_backend(data["attn_backend_config"]["backend"])
                     else:                                       self.pipe.unet.set_attention_backend(data["attn_backend_config"]["backend"])
-                    self.log(f"ℹ️ Set attention backend to {data["attn_backend_config"]["backend"]}", rank_0_only=True)
-                self.log("✅ Pipeline initialized")
+                    self.log(f"ℹ️ Set attention backend to {data["attn_backend_config"]["backend"]}")
+                self.log("✅ Pipeline initialized", rank_0_only=False)
                 self.progress = 50
 
                 # for debugging
@@ -539,7 +553,7 @@ class CommonHost:
                     if data["enable_attention_slicing"] == True:    self.pipe.enable_attention_slicing()
                     if data["xformers_efficient"] == True:
                         if self.pipeline_type not in ["flux", "zimage"]:    self.pipe.enable_xformers_memory_efficient_attention()  # NOTE: blocked because causes tensor size mismatches
-                        else:                                               self.log("⚠️ xformers not supported for this pipeline - ignoring", rank_0_only=True)
+                        else:                                               self.log("⚠️ xformers not supported for this pipeline - ignoring")
                 self.progress = 70
 
                 # group offloading
@@ -547,7 +561,7 @@ class CommonHost:
                     pass
                 else:
                     if backend_name in ["balanced"]:
-                        self.log("❌ Group offloading not supported for this host - ignoring", rank_0_only=True)
+                        self.log("❌ Group offloading not supported for this host - ignoring")
                     else:
                         transformer_offload_config = data["group_offload_config"].get("transformer")
                         encoder_offload_config = data["group_offload_config"].get("encoder")
@@ -619,7 +633,7 @@ class CommonHost:
                     if target is not None:
                         names = []
                         for k, v in data["lora"].items():
-                            self.log(f"⏳ Loading lora: {k}", rank_0_only=True)
+                            self.log(f"⏳ Loading lora: {k}")
                             if k.endswith(".safetensors") or k.endswith(".sft"):    weights = safetensors.torch.load_file(k, device=f'cuda:{self.local_rank}')
                             else:                                                   weights = torch.load(k, map_location=torch.device(f'cuda:{self.local_rank}'))
                             # for k2,v2 in weights.items():                           weights[k2] = v2.to(device=target.device, dtype=target.dtype)
@@ -627,14 +641,14 @@ class CommonHost:
                             a = w if not "." in w else w.split(".")[0]
                             names.append(a)
                             self.pipe.load_lora_weights(weights, weight_name=w, adapter_name=a, local_files_only=True, low_cpu_mem_usage=True)
-                            self.log(f"✅ Added LoRA (scale={v}): {k}", rank_0_only=True)
+                            self.log(f"✅ Added LoRA (scale={v}): {k}")
 
                         target.set_adapters(names, list(data["lora"].values()))
                         loaded_adapters = target.active_adapters()
                         loaded_adapters_string = ""
                         for la in loaded_adapters: loaded_adapters_string += "\n        " + la
-                        self.log(f"📟 Total loaded LoRAs: {len(loaded_adapters)}", rank_0_only=True)
-                        self.log(f"📚 Adapters: {loaded_adapters_string}", rank_0_only=True)
+                        self.log(f"📟 Total loaded LoRAs: {len(loaded_adapters)}")
+                        self.log(f"📚 Adapters: {loaded_adapters_string}")
                         if len(names) > 0:  self.adapter_names = names
                         else:               self.adapter_names = None
                 self.progress = 90
@@ -646,7 +660,7 @@ class CommonHost:
 
                 if self.pipeline_type in ["sd1", "sd2", "sdxl"] and data["sd_fuse_qkv_projections"] == True:
                     self.pipe.fuse_qkv_projections()
-                    self.log("✅ Fused qkv projections", rank_0_only=True)
+                    self.log("✅ Fused qkv projections")
 
                 if data["compile_config"] is not None:
                     compile_transformer     = data["compile_config"].get("compile_transformer")
@@ -662,13 +676,13 @@ class CommonHost:
                         try:
                             compile_options = json.loads(compile_options)
                         except:
-                            self.log("⚠️ Invalid JSON for compile_options - ignoring compile_options", rank_0_only=True)
+                            self.log("⚠️ Invalid JSON for compile_options - ignoring compile_options")
                             compile_options = None
                     else:
                         compile_options = None
 
                     if compile_mode is not None and compile_options is not None:
-                        self.log("⚠️ compile_mode and compile_options are both defined - will ignore compile_mode", rank_0_only=True)
+                        self.log("⚠️ compile_mode and compile_options are both defined - will ignore compile_mode")
                         compile_mode = None
 
                     compiler_config                             = {}
@@ -690,14 +704,14 @@ class CommonHost:
                 clean()
 
                 # complete
-                self.log("✅ Model initialization completed")
+                self.log("✅ Model initialization completed", rank_0_only=False)
                 self.print_mem_usage()
                 self.applied = data
                 self.progress = 100
 
                 return "", 200
             except:
-                self.log(traceback.format_exc())
+                self.log(traceback.format_exc(), rank_0_only=False)
                 return "", 500
 
 
@@ -712,7 +726,7 @@ class CommonHost:
             config_path = model_dict.get("config")
             assert config_path is not None, "You must provide a config_path when loading from a single file"
 
-        self.log(f"ℹ️ Loading model: {model_path} with config: {str(config_path)}", rank_0_only=True)
+        self.log(f"ℹ️ Loading model: {model_path} with config: {str(config_path)}")
         kwargs = {}
         kwargs["torch_dtype"] = self.torch_dtype
         kwargs["use_safetensors"] = True
@@ -768,7 +782,7 @@ class CommonHost:
             config_path = model_dict.get("config")
             assert config_path is not None, "You must provide a config_path when loading from a single file"
 
-        self.log(f"ℹ️ Loading model: {model_path} with config: {str(config_path)}", rank_0_only=True)
+        self.log(f"ℹ️ Loading model: {model_path} with config: {str(config_path)}")
         kwargs = {}
         kwargs["torch_dtype"] = self.torch_dtype
         kwargs["local_files_only"] = True
@@ -797,7 +811,7 @@ class CommonHost:
 
 
     def compile_helper(self, target, compile_config):
-        # self.log(f"⚙️ Compiling {target}", rank_0_only=True)
+        # self.log(f"⚙️ Compiling {target}")
         match target:
             case "transformer":
                 if self.adapter_names is not None:
@@ -823,11 +837,11 @@ class CommonHost:
                 if hasattr(self.pipe, "image_encoder") and self.pipe.image_encoder is not None:
                     self.pipe.image_encoder = torch.compile(self.pipe.image_encoder, **compile_config)
             case _:
-                self.log("❌ Unknown compile target - not compiling", rank_0_only=True)
+                self.log("❌ Unknown compile target - not compiling")
                 return
 
-        # self.log(f"✅ Compiled {target}", rank_0_only=True)
-        self.log(f"⚙️ {target} will be compiled", rank_0_only=True)
+        # self.log(f"✅ Compiled {target}")
+        self.log(f"⚙️ {target} will be compiled")
         return
 
 
@@ -851,7 +865,7 @@ class CommonHost:
                         formatted += f'\n        {k}: {sv}'
                     else:
                         formatted += f'\n        {k}: {str(v is not None)}'
-        self.log(formatted, rank_0_only=True)
+        self.log(formatted)
         return
 
 
@@ -916,7 +930,7 @@ class CommonHost:
             try:    mem = round(v.get_memory_footprint() / 1024 / 1024, 1)
             except: mem = "?"
             mem_usage_string += f"\n        {k}: {mem} MB"
-        self.log(f"{mem_usage_string}", rank_0_only=True)
+        self.log(f"{mem_usage_string}")
         return
 
 
@@ -930,23 +944,23 @@ class CommonHost:
                 timesteps, num_inference_steps = result()
 
                 if len(timesteps) > 0 and start > 0:
-                    # self.log("Old timesteps: " + str(timesteps), rank_0_only=True)
+                    # self.log("Old timesteps: " + str(timesteps))
                     timesteps = self.pipe.scheduler.timesteps[start * self.pipe.scheduler.order :]
                     if hasattr(self.pipe.scheduler, "set_begin_index"):
                         self.pipe.scheduler.set_begin_index(start * self.pipe.scheduler.order)
 
-                    # self.log("New timesteps: " + str(timesteps), rank_0_only=True)
+                    # self.log("New timesteps: " + str(timesteps))
                 return timesteps, num_inference_steps - start
             override_function(self.pipe.__class__, 'retrieve_timesteps', new_retrieve_timesteps)
         return
 
 
     def setup_inference(self, data, can_use_compel=True, callbacks={}):
+        self.progress = 0
+
         # set scheduler
-        if data["scheduler"] is not None:
-            self.set_scheduler(data["scheduler"])
-        elif self.default_scheduler is not None:
-            self.pipe.scheduler = self.default_scheduler
+        if data["scheduler"] is not None:   self.set_scheduler(data["scheduler"])
+        else:                               self.pipe.scheduler = self.default_scheduler
 
         if data["denoising_start"] is not None and data["denoising_start"] > 0:
             if self.pipeline_type in DENOISING_START_WORKAROUND_PIPELINES:
@@ -977,9 +991,9 @@ class CommonHost:
         def set_step_progress(pipe, index, timestep, callback_kwargs):
             global DENOISING_START_WORKAROUND_PIPELINES, get_scheduler_progressbar_offset_index
             nonlocal self, callbacks, data
-            # self.log(str(callback_kwargs["latents"]), rank_0_only=True)
+            # self.log(str(callback_kwargs["latents"]))
             if torch.any(callback_kwargs["latents"].isnan()):
-                self.log("⁉️ NaN detected in latents - stopping generation")
+                self.log("⁉️ NaN detected in latents - stopping generation", rank_0_only=False)
                 self.pipe._interrupt = True
                 self.progress = 100
                 return callback_kwargs
@@ -994,17 +1008,17 @@ class CommonHost:
             # denoising_start workaround
             if data["latent"] is not None and self.pipeline_type in DENOISING_START_WORKAROUND_PIPELINES:
                 if the_index == data["denoising_start"]:
-                    self.log(f"ℹ️ Injecting latent at step {str(the_index)}")
+                    self.log(f"ℹ️ Injecting latent at step {str(the_index)}", rank_0_only=False)
                     callback_kwargs["latents"] = data["latent"]
                 elif the_index < data["denoising_start"]:
                     callback_kwargs["latents"] = torch.zeros_like(data["latent"])
 
             # denoising_end
             if data["denoising_end"] is not None and the_index >= data["denoising_end"]:
-                self.log("ℹ️ Denoising end reached - stopping generation")
+                self.log("ℹ️ Denoising end reached - stopping generation", rank_0_only=False)
                 self.pipe._interrupt = True
 
-            self.progress = int(the_index / data["steps"] * 100)
+            self.progress = round((the_index / data["steps"]) * 100)
             return callback_kwargs
 
         # compel
