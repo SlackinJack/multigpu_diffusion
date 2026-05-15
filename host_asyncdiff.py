@@ -261,7 +261,6 @@ def __generate_image_parallel(data):
         torch.cuda.reset_peak_memory_stats()
         warmup_steps = asyncdiff_config.get("synced_steps")
         # async_diff.reset_state(warm_up=warmup_steps)
-        base.progress = 0
 
         def complete(data, index, timestep, callback_kwargs):
             base.log("🚀 AsyncDiff warmup completed")
@@ -281,8 +280,6 @@ def __generate_image_parallel(data):
 
         # clean up
         clean()
-
-        base.progress = 100
 
         # output
         if base.local_rank == 0:

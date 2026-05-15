@@ -91,7 +91,6 @@ def __generate_image_parallel(data):
 
     with torch.no_grad():
         torch.cuda.reset_peak_memory_stats()
-        base.progress = 0
 
         # inference kwargs
         kwargs = base.setup_inference(data, can_use_compel=False)
@@ -112,8 +111,6 @@ def __generate_image_parallel(data):
 
         # clean up
         clean()
-
-        base.progress = 100
 
         # output
         if output is not None:
