@@ -25,10 +25,6 @@ from diffusers.schedulers import (
 
 
 def get_scheduler(scheduler_dict):
-    # TODO: complete this for the rest of the schedulers
-    match scheduler_dict["scheduler"]:
-        case "DPM++ 2M SDE":
-            if scheduler_dict.get("algorithm_type") is None:    scheduler_dict["algorithm_type"] = "sde-dpmsolver++"
     scheduler_class = get_scheduler_class(scheduler_dict.pop("scheduler"))
     return scheduler_class.from_config(scheduler_dict)
 
@@ -39,7 +35,6 @@ def get_scheduler_class(scheduler_name):
         case "DDPM":            return DDPMScheduler
         case "DEIS":            return DEISMultistepScheduler
         case "DPM++ 2M":        return DPMSolverMultistepScheduler
-        case "DPM++ 2M SDE":    return DPMSolverMultistepScheduler
         case "DPM++ SDE":       return DPMSolverSinglestepScheduler
         case "DPM SDE":         return DPMSolverSDEScheduler
         case "DPM2":            return KDPM2DiscreteScheduler
@@ -62,7 +57,6 @@ def get_scheduler_name(scheduler):
         case "DDPMScheduler":                   return "DDPM"
         case "DEISMultistepScheduler":          return "DEIS"
         case "DPMSolverMultistepScheduler":     return "DPM++ 2M"
-        # case "DPMSolverMultistepScheduler":     return "DPM++ 2M SDE"
         case "DPMSolverSinglestepScheduler":    return "DPM++ SDE"
         case "DPMSolverSDEScheduler":           return "DPM SDE"
         case "KDPM2DiscreteScheduler":          return "DPM2"

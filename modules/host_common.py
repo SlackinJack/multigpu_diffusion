@@ -318,7 +318,6 @@ class CommonHost:
     def set_scheduler(self, scheduler_config):
         params = json.loads(scheduler_config)
         self.pipe.scheduler = get_scheduler(params)
-        self.pipe.scheduler.set_timesteps(self.pipe.scheduler.config.num_train_timesteps)
         return
 
 
@@ -913,8 +912,8 @@ class CommonHost:
         data["negative_embeds"]                                                                 = decode_b64_and_unpickle(data["negative_embeds"])
         if data["positive"] is not None and len(data["positive"]) == 0:                         data["positive"] = None
         if data["negative"] is not None and len(data["negative"]) == 0:                         data["negative"] = None
-        if data["denoising_start"] is not None and data["denoising_start"] < 0:                 data["denoising_start"] = 0
-        if data["denoising_end"] is not None and data["denoising_end"] > data["steps"]:         data["denoising_end"]   = data["steps"]
+        if data["denoising_start"] is None or data["denoising_start"] < 0:                      data["denoising_start"] = 0
+        if data["denoising_end"] is None or data["denoising_end"] > data["steps"]:              data["denoising_end"] = data["steps"]
 
         # load images
         if data["image"] is not None and self.pipeline_type in ["sdup", "svd", "wani2v"]:       data["image"] = load_image(data["image"])
@@ -1018,7 +1017,7 @@ class CommonHost:
                 self.log("ℹ️ Denoising end reached - stopping generation", rank_0_only=False)
                 self.pipe._interrupt = True
 
-            self.progress = int(the_index / data["steps"] * 100)
+            self.progress = int((the_index + data["denoising_start"]) / min(data["steps"], data["denoising_end"]) * 100)
             return callback_kwargs
 
         # compel
