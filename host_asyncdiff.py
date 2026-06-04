@@ -51,7 +51,7 @@ def __run_host():
     parser.add_argument("--stride",         type=int,   default=1)
     parser.add_argument("--synced_steps",   type=int,   default=3)
     parser.add_argument("--time_shift",     type=int,   default=0)
-    parser.add_argument("--cache_step",     type=int,   default=1)
+    parser.add_argument("--cached_step",    type=int,   default=1)
     # generic
     for k, v in GENERIC_HOST_ARGS.items():  parser.add_argument(f"--{k}", type=v, default=None)
     for e in GENERIC_HOST_ARGS_TOGGLES:     parser.add_argument(f"--{e}", action="store_true")
@@ -244,10 +244,10 @@ def __apply_pipeline_parallel(data):
                 model_n=asyncdiff_config.get("model_n"),
                 stride=asyncdiff_config.get("stride"),
                 time_shift=asyncdiff_config.get("time_shift"),
-                cache_step=asyncdiff_config.get("cache_step"),
+                cached_step=asyncdiff_config.get("cached_step"),
             )
-            if asyncdiff_config.get("cache_step") is not None and asyncdiff_config.get("cache_step") > 1:
-                base.log("⚠️ cache_step enabled - this may severely degrade image quality if not tuned correctly")
+            if asyncdiff_config.get("cached_step") is not None and asyncdiff_config.get("cached_step") > 1:
+                base.log("⚠️ cached_step enabled - this may severely degrade image quality if not tuned correctly")
         return result
 
 

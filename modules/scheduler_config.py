@@ -24,11 +24,6 @@ from diffusers.schedulers import (
 )
 
 
-def get_scheduler(scheduler_dict):
-    scheduler_class = get_scheduler_class(scheduler_dict.pop("scheduler"))
-    return scheduler_class.from_config(scheduler_dict)
-
-
 def get_scheduler_class(scheduler_name):
     match scheduler_name:
         case "DDIM":            return DDIMScheduler
@@ -70,7 +65,7 @@ def get_scheduler_name(scheduler):
         case "PNDMScheduler":                   return "PNDM"
         case "TCDScheduler":                    return "TCD"
         case "UniPCMultistepScheduler":         return "UniPC"
-        case _:                                 return None
+        case _:                                 raise NotImplementedError
 
 
 def get_scheduler_supports_setting_timesteps_or_sigmas(scheduler):

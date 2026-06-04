@@ -317,7 +317,8 @@ class CommonHost:
 
     def set_scheduler(self, scheduler_config):
         params = json.loads(scheduler_config)
-        self.pipe.scheduler = get_scheduler(params)
+        klass = get_scheduler_class(params.pop("scheduler"))
+        self.pipe.scheduler = klass.from_config(params)
         return
 
 
