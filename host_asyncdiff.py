@@ -1,4 +1,4 @@
-import argparse
+﻿import argparse
 import logging
 import os
 import signal
@@ -33,9 +33,10 @@ def __initialize_distributed_environment():
     global base
     base = CommonHost()
     mp.set_start_method("spawn", force=True)
-    torch.cuda.set_device(int(os.environ.get("LOCAL_RANK", 0)))
-    dist.init_process_group("nccl", timeout=timedelta(days=1))
-    base.local_rank = dist.get_rank()
+    local_rank = int(os.environ.get("LOCAL_RANK", 0))
+    torch.cuda.set_device(local_rank)
+    dist.init_process_group("nccl", device_id=local_rank, timeout=timedelta(days=1))
+    base.local_rank = local_rank
     base.set_logger()
     base.initialized = True
     return
@@ -51,6 +52,7 @@ def __run_host():
     parser.add_argument("--stride",         type=int,   default=1)
     parser.add_argument("--synced_steps",   type=int,   default=3)
     parser.add_argument("--time_shift",     type=int,   default=0)
+    parser.add_argument("--shifted_steps",  type=int,   default=0)
     parser.add_argument("--cached_step",    type=int,   default=1)
     # generic
     for k, v in GENERIC_HOST_ARGS.items():  parser.add_argument(f"--{k}", type=v, default=None)
@@ -238,12 +240,20 @@ def __apply_pipeline_parallel(data):
                 ad_class = AsyncDiffZImage
             else:
                 ad_class = AsyncDiffStableDiffusion
+            base.log(f"""ℹ️ Initializing AsyncDiff:
+        model_n: {asyncdiff_config.get("model_n")}
+        stride: {asyncdiff_config.get("stride")}
+        synced_steps: {asyncdiff_config.get("synced_steps")}
+        time_shift: {asyncdiff_config.get("time_shift")}
+        shifted_steps: {asyncdiff_config.get("shifted_steps")}
+        cached_step: {asyncdiff_config.get("cached_step")}""")
             async_diff = ad_class(
                 base.pipe,
                 base.pipeline_type,
                 model_n=asyncdiff_config.get("model_n"),
                 stride=asyncdiff_config.get("stride"),
                 time_shift=asyncdiff_config.get("time_shift"),
+                shifted_steps=asyncdiff_config.get("shifted_steps"),
                 cached_step=asyncdiff_config.get("cached_step"),
             )
             if asyncdiff_config.get("cached_step") is not None and asyncdiff_config.get("cached_step") > 1:
@@ -275,7 +285,10 @@ def __generate_image_parallel(data):
         # inference
         dist.barrier()
         with torch.inference_mode():
+            start_time = time.perf_counter()
             output = base.pipe(**kwargs)
+            end_time = time.perf_counter()
+            base.log(f"⏱️ Processing time: {end_time - start_time:0.3f}")
         dist.barrier()
 
         # clean up

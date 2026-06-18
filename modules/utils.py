@@ -56,8 +56,8 @@ def get_torch_type(t):
 
 
 def clean():
-    torch.cuda.memory.empty_cache()
     gc.collect()
+    torch.cuda.empty_cache()
     return
 
 

@@ -1,4 +1,4 @@
-import argparse
+﻿import argparse
 import cache_dit
 import logging
 import os
@@ -104,7 +104,10 @@ def __generate_image_parallel(data):
                 helper.set_params(cache_interval=args.deep_cache_interval, cache_branch_id=args.deep_cache_id)
                 helper.enable()
                 base.log("ℹ️ DeepCache enabled", rank_0_only=False)
+            start_time = time.perf_counter()
             output = base.pipe(**kwargs)
+            end_time = time.perf_counter()
+            base.log(f"⏱️ Processing time: {end_time - start_time:0.3f}")
             if can_use_deep_cache:
                 helper.disable()
                 base.log("ℹ️ DeepCache disabled", rank_0_only=False)

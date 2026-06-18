@@ -297,6 +297,8 @@ class CommonHost:
 
     def close_pipeline(self):
         # TODO: fix this method to properly free up resources
+        if self.pipe is not None:
+            self.pipe.to("cpu")
         # self.local_rank = -1
         self.vae_dtype = None
         self.torch_dtype = torch.float16
@@ -312,6 +314,7 @@ class CommonHost:
         self.is_transformer_model_type = False
         self.can_use_deepcache = False
         self.can_use_cachedit = False
+        clean()
         return
 
 
@@ -373,7 +376,6 @@ class CommonHost:
 
                 # reset current
                 self.close_pipeline()
-                clean()
 
                 # setup current
                 self.pipeline_type = data["pipeline_type"]
@@ -1014,11 +1016,11 @@ class CommonHost:
                     callback_kwargs["latents"] = torch.zeros_like(data["latent"])
 
             # denoising_end
-            if data["denoising_end"] is not None and the_index >= data["denoising_end"]:
+            if data["denoising_end"] is not None and the_index + 1 > data["denoising_end"]:
                 self.log("ℹ️ Denoising end reached - stopping generation", rank_0_only=False)
                 self.pipe._interrupt = True
 
-            self.progress = int((the_index + data["denoising_start"]) / min(data["steps"], data["denoising_end"]) * 100)
+            self.progress = int((the_index + 1 + data["denoising_start"]) / min(data["steps"], data["denoising_end"]) * 100)
             return callback_kwargs
 
         # compel
@@ -1146,7 +1148,7 @@ class CommonHost:
                 if data["positive_pooled_embeds"] is not None:  kwargs["pooled_prompt_embeds"]          = data["positive_pooled_embeds"]
                 if data["negative_embeds"] is not None:         kwargs["negative_prompt_embeds"]        = data["negative_embeds"]
                 if data["negative_pooled_embeds"] is not None:  kwargs["negative_pooled_prompt_embeds"] = data["negative_pooled_embeds"]
-                if data["denoising_end"] is not None:           kwargs["denoising_end"]                 = float(data["denoising_end"] / data["steps"])
+                # if data["denoising_end"] is not None:           kwargs["denoising_end"]                 = float(data["denoising_end"] / data["steps"])
 
                 if self.applied.get("ip_adapter") is not None and data["ip_image"] is not None:
                     kwargs["ip_adapter_image"]                  = data["ip_image"]
