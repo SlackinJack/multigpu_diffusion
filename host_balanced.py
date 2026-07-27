@@ -122,7 +122,10 @@ def __generate_image_parallel(data):
                     output = output.images[0]
                 else:
                     output_images = output.images
-                    if base.pipeline_type in ["flux"]: output_images = base.pipe._unpack_latents(output_images, data["height"], data["width"], base.pipe.vae_scale_factor)
+                    if base.pipeline_type in ["flux"]:
+                        output_images = base.pipe._unpack_latents(output_images, data["height"], data["width"], base.pipe.vae_scale_factor)
+                    elif base.pipeline_type in ["krea2"]:
+                        output_images = base.pipe._unpack_latents(output_images, data["height"], data["width"])
                     flag = base.pipe.vae.device == torch.device("cpu")
                     if flag: base.pipe.vae = base.pipe.vae.to(device=output_images.device)
                     images = base.convert_latent_to_image(output_images)

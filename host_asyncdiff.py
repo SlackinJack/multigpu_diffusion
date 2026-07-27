@@ -12,6 +12,7 @@ from flask import Flask, request, jsonify
 
 from AsyncDiff.asyncdiff.async_animate import AsyncDiff as AsyncDiffAnimateDiff
 from AsyncDiff.asyncdiff.async_flux import AsyncDiff as AsyncDiffFlux
+from AsyncDiff.asyncdiff.async_krea2 import AsyncDiff as AsyncDiffKrea2
 from AsyncDiff.asyncdiff.async_sd import AsyncDiff as AsyncDiffStableDiffusion
 from AsyncDiff.asyncdiff.async_sd3 import AsyncDiff as AsyncDiffStableDiffusion3
 from AsyncDiff.asyncdiff.async_wan import AsyncDiff as AsyncDiffWan
@@ -54,6 +55,7 @@ def __run_host():
     parser.add_argument("--time_shift",     type=int,   default=0)
     parser.add_argument("--shifted_steps",  type=int,   default=0)
     parser.add_argument("--cached_step",    type=int,   default=1)
+    parser.add_argument("--ramped_time_shift",          action="store_true")
     # generic
     for k, v in GENERIC_HOST_ARGS.items():  parser.add_argument(f"--{k}", type=v, default=None)
     for e in GENERIC_HOST_ARGS_TOGGLES:     parser.add_argument(f"--{e}", action="store_true")
@@ -232,6 +234,8 @@ def __apply_pipeline_parallel(data):
                 ad_class = AsyncDiffAnimateDiff
             elif base.pipeline_type in ["flux"]:
                 ad_class = AsyncDiffFlux
+            elif base.pipeline_type in ["krea2"]:
+                ad_class = AsyncDiffKrea2
             elif base.pipeline_type in ["sd3"]:
                 ad_class = AsyncDiffStableDiffusion3
             elif base.pipeline_type in ["wani2v", "want2v"]:
@@ -302,7 +306,10 @@ def __generate_image_parallel(data):
                         output = output.images[0]
                     else:
                         output_images = output.images
-                        if base.pipeline_type in ["flux"]: output_images = base.pipe._unpack_latents(output_images, data["height"], data["width"], base.pipe.vae_scale_factor)
+                        if base.pipeline_type in ["flux"]:
+                            output_images = base.pipe._unpack_latents(output_images, data["height"], data["width"], base.pipe.vae_scale_factor)
+                        elif base.pipeline_type in ["krea2"]:
+                            output_images = base.pipe._unpack_latents(output_images, data["height"], data["width"])
                         images = base.convert_latent_to_image(output_images)
                         latents = base.convert_latent_to_output_latent(output_images)
                         return { "message": "OK", "output": pickle_and_encode_b64(images[0]), "latent": pickle_and_encode_b64(latents), "is_image": True }

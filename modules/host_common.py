@@ -13,6 +13,7 @@ from diffusers import (
     ControlNetModel,
     GGUFQuantizationConfig,
     FluxTransformer2DModel,
+    Krea2Transformer2DModel,
     MotionAdapter,
     PipelineQuantizationConfig,
     SD3Transformer2DModel,
@@ -27,6 +28,8 @@ from diffusers import (
     AnimateDiffPipeline,
     FluxControlNetPipeline,
     FluxPipeline,
+    Krea2Pipeline,
+    # Krea2ControlNetPipeline,
     StableDiffusion3ControlNetPipeline,
     StableDiffusion3Pipeline,
     StableDiffusionControlNetPipeline,
@@ -68,6 +71,7 @@ from transformers import (
     CLIPTextModel,
     CLIPTextModelWithProjection,
     Qwen3ForCausalLM,
+    Qwen3VLModel,
     UMT5EncoderModel,
 )
 from PIL import Image
@@ -319,8 +323,11 @@ class CommonHost:
 
 
     def set_scheduler(self, scheduler_config):
-        params = json.loads(scheduler_config)
-        klass = get_scheduler_class(params.pop("scheduler"))
+        klass = get_scheduler_class(scheduler_config["scheduler"])
+        params = {}
+        for k, v in scheduler_config.items():
+            if k is not "scheduler":
+                params[k] = v
         self.pipe.scheduler = klass.from_config(params)
         return
 
@@ -423,6 +430,7 @@ class CommonHost:
                 if data["transformer"] is not None:
                     match self.pipeline_type:
                         case "flux":    kwargs["transformer"] = self.load_model(data["transformer"], "FluxTransformer2DModel")
+                        case "krea2":   kwargs["transformer"] = self.load_model(data["transformer"], "Krea2Transformer2DModel")
                         case "sd3":     kwargs["transformer"] = self.load_model(data["transformer"], "SD3Transformer2DModel")
                         case "zimage":  kwargs["transformer"] = self.load_model(data["transformer"], "ZImageTransformer2DModel")
                         case _:         kwargs["unet"] = self.load_model(data["transformer"], "UNet2DConditionModel")
@@ -437,6 +445,7 @@ class CommonHost:
                 if data["text_encoder"] is not None or data["text_encoder_2"] is not None or data["text_encoder_3"] is not None:
                     if data["text_encoder"] is not None:
                         match self.pipeline_type:
+                            case "krea2":   kwargs["text_encoder"] = self.load_encoder(data["text_encoder"], "Qwen3VLModel")
                             case "sdxl":    kwargs["text_encoder"] = self.load_encoder(data["text_encoder"], "CLIPTextModel")
                             case "sdup":    kwargs["text_encoder"] = self.load_encoder(data["text_encoder"], "CLIPTextModel")
                             case "wani2v":  kwargs["text_encoder"] = self.load_encoder(data["text_encoder"], "UMT5EncoderModel")
@@ -472,6 +481,11 @@ class CommonHost:
                         self.can_use_deepcache = True # TODO: test
                     case "flux":
                         PipelineClass = FluxControlNetPipeline if data["control_net"] is not None else FluxPipeline
+                        self.is_transformer_model_type = True
+                        self.can_use_cachedit = True
+                    case "krea2":
+                        # PipelineClass = Krea2ControlNetPipeline if data["control_net"] is not None else Krea2Pipeline
+                        PipelineClass = Krea2Pipeline
                         self.is_transformer_model_type = True
                         self.can_use_cachedit = True
                     case "sd1":
@@ -558,8 +572,10 @@ class CommonHost:
                     if data["enable_vae_tiling"] == True:           self.pipe.vae.enable_tiling()
                     if data["enable_attention_slicing"] == True:    self.pipe.enable_attention_slicing()
                     if data["xformers_efficient"] == True:
-                        if self.pipeline_type not in ["flux", "zimage"]:    self.pipe.enable_xformers_memory_efficient_attention()  # NOTE: blocked because causes tensor size mismatches
-                        else:                                               self.log("⚠️ xformers not supported for this pipeline - ignoring")
+                        if self.pipeline_type not in ["flux", "krea2", "zimage"]:
+                            self.pipe.enable_xformers_memory_efficient_attention()  # NOTE: blocked because causes tensor size mismatches
+                        else:
+                            self.log("⚠️ xformers not supported for this pipeline - ignoring")
                 self.progress = 70
 
                 # group offloading
@@ -759,6 +775,9 @@ class CommonHost:
             case "FluxTransformer2DModel":
                 if is_checkpoint:   return FluxTransformer2DModel.from_pretrained(model_path, **kwargs)
                 else:               return FluxTransformer2DModel.from_single_file(model_path, **kwargs)
+            case "Krea2Transformer2DModel":
+                if is_checkpoint:   return Krea2Transformer2DModel.from_pretrained(model_path, **kwargs)
+                else:               return Krea2Transformer2DModel.from_single_file(model_path, **kwargs)
             case "MotionAdapter":
                 if is_checkpoint:   return MotionAdapter.from_pretrained(model_path, **kwargs)
                 else:               return MotionAdapter.from_single_file(model_path, **kwargs)
@@ -809,6 +828,8 @@ class CommonHost:
                 return CLIPTextModelWithProjection.from_pretrained(model_path, **kwargs)
             case "Qwen3ForCausalLM":
                 return Qwen3ForCausalLM.from_pretrained(model_path, **kwargs)
+            case "Qwen3VLModel":
+                return Qwen3VLModel.from_pretrained(model_path, **kwargs)
             case "UMT5EncoderModel":
                 return UMT5EncoderModel.from_pretrained(model_path, **kwargs)
             case _:
@@ -871,6 +892,24 @@ class CommonHost:
         return
 
 
+    def print_timesteps(self, timesteps):
+        t_string = str(timesteps)
+        formatted = "👣 Timesteps:"
+        for t in t_string.split("\n"):
+            formatted += f'\n        {t}'
+        self.log(formatted)
+        return
+
+
+    def print_sigmas(self, timesteps):
+        t_string = str(timesteps)
+        formatted = "📊 Sigmas:"
+        for t in t_string.split("\n"):
+            formatted += f'\n        {t}'
+        self.log(formatted)
+        return
+
+
     def prepare_inputs(self, data):
         data["height"]              = data.setdefault("height")
         data["width"]               = data.setdefault("width")
@@ -916,7 +955,7 @@ class CommonHost:
         if data["positive"] is not None and len(data["positive"]) == 0:                         data["positive"] = None
         if data["negative"] is not None and len(data["negative"]) == 0:                         data["negative"] = None
         if data["denoising_start"] is None or data["denoising_start"] < 0:                      data["denoising_start"] = 0
-        if data["denoising_end"] is None or data["denoising_end"] > data["steps"]:              data["denoising_end"] = data["steps"]
+        # if data["denoising_end"] is None or data["denoising_end"] > data["steps"]:              data["denoising_end"] = None
 
         # load images
         if data["image"] is not None and self.pipeline_type in ["sdup", "svd", "wani2v"]:       data["image"] = load_image(data["image"])
@@ -958,9 +997,16 @@ class CommonHost:
         self.progress = 0
 
         # set scheduler
+        custom_timesteps, custom_sigmas = None, None
         if data["scheduler"] is not None:
+            data["scheduler"] = json.loads(data["scheduler"])
+            custom_timesteps = data["scheduler"].pop("timesteps", None)
+            custom_sigmas = data["scheduler"].pop("sigmas", None)
             self.set_scheduler(data["scheduler"])
             self.log(f"ℹ️ Set scheduler to {get_scheduler_name(self.pipe.scheduler)}")
+            if custom_timesteps is not None and custom_sigmas is not None:
+                self.log(f"⚠️ Both timesteps and sigmas were provided! Only one is allowed - using timesteps.")
+                custom_sigmas = None
         elif self.pipe.scheduler != self.default_scheduler:
             self.pipe.scheduler = copy.deepcopy(self.default_scheduler)
             self.log(f"ℹ️ Reverted scheduler to {get_scheduler_name(self.pipe.scheduler)}")
@@ -975,8 +1021,8 @@ class CommonHost:
             self.set_scheduler_timesteps()
 
         # dirty patch zimage for heun
-        if self.pipeline_type == "zimage" and data.get("scheduler") is not None:
-            if json.loads(data["scheduler"])["scheduler"] == "fm_heun":
+        if self.pipeline_type == "zimage" and data["scheduler"] is not None:
+            if data["scheduler"]["scheduler"] == "fm_heun":
                 # NOTE: copied from above - zimage uses latent inject when start>0, this will be fine...for now
                 clean_override_function(self.pipe.__class__, 'retrieve_timesteps')
                 old_retrieve_timesteps = get_function_from_class(self.pipe.__class__, 'retrieve_timesteps')
@@ -1015,12 +1061,25 @@ class CommonHost:
                 elif the_index < data["denoising_start"]:
                     callback_kwargs["latents"] = torch.zeros_like(data["latent"])
 
+            # end calculations
+            end = data["steps"]
+            if custom_timesteps is not None or custom_sigmas is not None:
+                end = len(custom_timesteps if custom_timesteps is not None else custom_sigmas)
+            if data["denoising_end"] is not None and data["denoising_end"] < end:
+                end = data["denoising_end"]
+
             # denoising_end
-            if data["denoising_end"] is not None and the_index + 1 > data["denoising_end"]:
+            # if data["denoising_end"] is not None and the_index + 1 > data["denoising_end"]:
+            if the_index + 1 > end:
                 self.log("ℹ️ Denoising end reached - stopping generation", rank_0_only=False)
                 self.pipe._interrupt = True
 
-            self.progress = int((the_index + 1 + data["denoising_start"]) / min(data["steps"], data["denoising_end"]) * 100)
+            #self.progress = int((the_index + 1 + data["denoising_start"]) / min(data["steps"], data["denoising_end"] if data["denoising_end"] is not None else 2 ** 32 - 1) * 100)
+            self.progress = int((the_index + 1 + data["denoising_start"]) / end * 100)
+            if self.progress == 100 or self.pipe._interrupt == True:
+                self.print_timesteps(self.pipe.scheduler.timesteps)
+                if get_scheduler_name(self.pipe.scheduler) == "Euler":
+                    self.print_sigmas(self.pipe.scheduler.sigmas)
             return callback_kwargs
 
         # compel
@@ -1060,6 +1119,8 @@ class CommonHost:
         kwargs["num_inference_steps"]                           = data["steps"]
         kwargs["callback_on_step_end"]                          = set_step_progress
         kwargs["callback_on_step_end_tensor_inputs"]            = ["latents"]
+        if custom_timesteps is not None:                        kwargs["timesteps"]             = custom_timesteps
+        if custom_sigmas is not None:                           kwargs["sigmas"]                = custom_sigmas
         match self.pipeline_type:
             case "ad":
                 kwargs["output_type"]                           = "pil"
@@ -1116,6 +1177,19 @@ class CommonHost:
                 if data["positive"] is not None:                kwargs["prompt"]                = data["positive"]
                 if data["negative"] is not None:                kwargs["negative_prompt"]       = data["negative"]
                 if data["frames"] is not None:                  kwargs["num_frames"]            = data["frames"]
+            case "krea2": # TODO: complete
+                kwargs["output_type"]                           = "latent"
+                kwargs["guidance_scale"]                        = data["cfg"]
+                if data["height"] is not None:                  kwargs["height"]                = data["height"]
+                if data["width"] is not None:                   kwargs["width"]                 = data["width"]
+                if data["positive"] is not None:                kwargs["prompt"]                = data["positive"]
+                if data["negative"] is not None:                kwargs["negative_prompt"]       = data["negative"]
+                if data["positive_embeds"] is not None:
+                    kwargs["pooled_prompt_embeds"]              = data["positive_embeds"][0][1]["pooled_output"]
+                    kwargs["prompt_embeds"]                     = data["positive_embeds"][0][0]
+                if data["negative_embeds"] is not None:
+                    kwargs["negative_pooled_prompt_embeds"]            = data["negative_embeds"][0][1]["pooled_output"]
+                    kwargs["negative_prompt_embeds"]                   = data["negative_embeds"][0][0]
             case "zimage": # TODO: complete
                 kwargs["output_type"]                           = "latent"
                 kwargs["guidance_scale"]                        = data["cfg"]
@@ -1181,9 +1255,16 @@ class CommonHost:
         if self.vae_dtype is not None:
             default_vae_dtype = self.pipe.vae.dtype
             self.pipe.vae = self.pipe.vae.to(dtype=self.vae_dtype)
-        latents = latents.to(dtype=self.pipe.vae.dtype)
-        latents = latents / self.pipe.vae.config.scaling_factor
-        latents = self.pipe.vae.decode(latents, return_dict=False)[0]
+        latents = latents.to(device=self.pipe.vae.device, dtype=self.pipe.vae.dtype)
+        if self.pipeline_type in ["krea2"]:
+            # copied directly from krea pipeline
+            latents_mean = torch.tensor(self.pipe.vae.config.latents_mean).view(1, self.pipe.vae.config.z_dim, 1, 1, 1).to(latents.device, latents.dtype)
+            latents_std = 1.0 / torch.tensor(self.pipe.vae.config.latents_std).view(1, self.pipe.vae.config.z_dim, 1, 1, 1).to(latents.device, latents.dtype)
+            latents = latents / latents_std + latents_mean
+            latents = self.pipe.vae.decode(latents, return_dict=False)[0][:, :, 0]
+        else:
+            latents = latents / self.pipe.vae.config.scaling_factor
+            latents = self.pipe.vae.decode(latents, return_dict=False)[0]
         latents = self.pipe.image_processor.postprocess(latents, output_type="pil")
         if self.vae_dtype is not None:
             self.pipe.vae = self.pipe.vae.to(dtype=default_vae_dtype)
