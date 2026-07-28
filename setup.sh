@@ -10,6 +10,7 @@ echo ""
 git clone https://github.com/SlackinJack/AsyncDiff AsyncDiff --depth=1
 
 
+# uncomment if you need to install requirements
 # echo ""
 # echo "########## Installing Requirements ##########"
 # echo ""
