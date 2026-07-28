@@ -1,20 +1,22 @@
+# these requirements are only used
+# for running krea2 and newer
+
 bitsandbytes>=0.49.1
 cache-dit>=1.3.5
+compel>=2.4.0
 DeepCache>=0.1.1
 Flask>=3.1.3
 numpy>=2.4.4
 optimum-quanto>=0.2.7
 pillow>=12.2.0
 safetensors>=0.7.0
-sdnq>=0.1.7
-torchvision>=0.25.0
+sdnq>=0.2.0
 xformers>=0.0.35
 
 # version locks
-compel==2.3.1
 diffusers==0.39.0
 peft==0.19.1
 torch==2.10.0
-torchao==0.13.0
 torchaudio==2.10.0
+torchvision==0.25.0
 transformers==5.14.1

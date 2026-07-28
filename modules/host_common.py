@@ -45,26 +45,14 @@ from diffusers import (
 )
 from diffusers import BitsAndBytesConfig as BitsAndBytesConfigD
 from diffusers import QuantoConfig as QuantoConfigD
-from diffusers import TorchAoConfig as TorchAoConfigD
 from diffusers.hooks import apply_group_offloading
 from diffusers.utils import load_image
 from diffusers.utils.torch_utils import randn_tensor
 from safetensors.torch import load_file
 from sdnq import SDNQConfig
 from sdnq.common import use_torch_compile as triton_is_available
-from torchao.quantization import (
-    Float8WeightOnlyConfig,
-    Float8DynamicActivationFloat8WeightConfig,
-    FPXWeightOnlyConfig,
-    Int8DynamicActivationInt4WeightConfig,
-    Int8DynamicActivationInt8WeightConfig,
-    Int4WeightOnlyConfig,
-    Int8WeightOnlyConfig,
-    UIntXWeightOnlyConfig,
-)
 from transformers import AutoModel as AutoModelT
 from transformers import BitsAndBytesConfig as BitsAndBytesConfigT
-from transformers import TorchAoConfig as TorchAoConfigT
 from transformers import QuantoConfig as QuantoConfigT
 from transformers import (
     AutoModelForCausalLM,
@@ -166,47 +154,6 @@ def get_quant_mapping(target, quantize_to):
             kwargs = { "weights_dtype": quantize_to.pop("quant_type") }
             for k,v in quantize_to.items(): kwargs[k] = v
             config = [SDNQConfig(**kwargs)] * 2
-        case "torchao":
-            def get_torchao_config(t):
-                # https://huggingface.co/docs/diffusers/main/quantization/torchao#supported-quantization-types
-                if t == "int4wo":
-                    return Int4WeightOnlyConfig()
-                elif t == "int4dq":
-                    return Int8DynamicActivationInt4WeightConfig()
-                elif t == "int8wo":
-                    return Int8WeightOnlyConfig()
-                elif t == "int8dq":
-                    return Int8DynamicActivationInt8WeightConfig()
-                elif t.startswith("uint") and t.endswith("wo"):
-                    # uint1wo, uint2wo, uint3wo, uint4wo, uint5wo, uint6wo, uint7wo
-                    t = t.replace("uint", "").replace("wo", "")
-                    match t:
-                        case "1": t = torch.uint1
-                        case "2": t = torch.uint2
-                        case "3": t = torch.uint3
-                        case "4": t = torch.uint4
-                        case "5": t = torch.uint5
-                        case "6": t = torch.uint6
-                        case "7": t = torch.uint7
-                        case _: return None
-                    return UIntXWeightOnlyConfig(dtype=t)
-                elif t == "float8wo":
-                    # float8wo
-                    return Float8WeightOnlyConfig()
-                elif t.startswith("fp") and "_" in t and "e" in t and "w" in t:
-                    # fpX_eAwB where X is the number of bits (1-7), A is exponent bits, and B is mantissa bits. Constraint: X == A + B + 1
-                    t = t.replace("fp", "").replace("_", "").replace("e", "").replace("w", "")
-                    try:
-                        x = int(t[0])
-                        a = int(t[1])
-                        b = int(t[2])
-                        if x == a + b + 1:
-                            return FPXWeightOnlyConfig(ebits=a, mbits=b)
-                    except:
-                        return None
-                return None
-            quant_type = get_torchao_config(quantize_to["quant_type"])
-            if quant_type is not None:  config = [TorchAoConfigD(quant_type), TorchAoConfigT(quant_type=quant_type)]
 
     if config is not None:
         match target:
