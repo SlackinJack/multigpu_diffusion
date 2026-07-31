@@ -195,7 +195,8 @@ class CommonHost:
     def __init__(self):
         self.local_rank = -1
         self.vae_dtype = None
-        self.torch_dtype = torch.float16
+        self.infer_dtype = torch.float32
+        self.weight_dtype = torch.float32
         self.initialized = False
         self.progress = 0
         self.pipe = None
@@ -250,9 +251,11 @@ class CommonHost:
         # TODO: fix this method to properly free up resources
         if self.pipe is not None:
             self.pipe.to("cpu")
+
         # self.local_rank = -1
         self.vae_dtype = None
-        self.torch_dtype = torch.float16
+        self.infer_dtype = torch.float32
+        self.weight_dtype = torch.float32
         self.initialized = False
         self.progress = 0
         self.pipe = None
@@ -283,7 +286,8 @@ class CommonHost:
         # models
         data["backend_config"]              = data.setdefault("backend_config")
         data["pipeline_type"]               = data.setdefault("pipeline_type")
-        data["variant"]                     = data.setdefault("variant")
+        data["infer_dtype"]                 = data.setdefault("infer_dtype")
+        data["weight_dtype"]                = data.setdefault("weight_dtype")
         data["checkpoint"]                  = data.setdefault("checkpoint")
         data["transformer"]                 = data.setdefault("transformer")
         data["vae"]                         = data.setdefault("vae")
@@ -357,10 +361,11 @@ class CommonHost:
 
                 # update globals
                 self.vae_dtype      = torch.float16 if data["vae_fp16"] == True else None
-                self.torch_dtype    = get_torch_type(data["variant"])
+                self.infer_dtype    = get_torch_type(data["infer_dtype"])
+                self.weight_dtype   = get_torch_type(data["weight_dtype"])
 
                 kwargs = {}
-                kwargs["torch_dtype"] = self.torch_dtype
+                kwargs["torch_dtype"] = self.weight_dtype
                 kwargs["use_safetensors"] = True
                 kwargs["local_files_only"] = True
                 kwargs["low_cpu_mem_usage"] = True
@@ -623,8 +628,11 @@ class CommonHost:
 
                 # compiles & optimizations
                 for k, v in self.pipe.components.items():
-                    try: v.eval()
-                    except: pass
+                    try:
+                        self.pipe.components[k] = v.eval()
+                        self.log(f"✅ Set {str(k)} to eval mode")
+                    except:
+                        pass
 
                 if self.pipeline_type in ["sd1", "sd2", "sdxl"] and data["sd_fuse_qkv_projections"] == True:
                     self.pipe.fuse_qkv_projections()
@@ -696,7 +704,7 @@ class CommonHost:
 
         self.log(f"ℹ️ Loading model: {model_path} with config: {str(config_path)}")
         kwargs = {}
-        kwargs["torch_dtype"] = self.torch_dtype
+        kwargs["torch_dtype"] = self.weight_dtype
         kwargs["use_safetensors"] = True
         kwargs["local_files_only"] = True
         kwargs["low_cpu_mem_usage"] = True
@@ -704,7 +712,7 @@ class CommonHost:
         if model_path.endswith(".ckpt"):
             kwargs["use_safetensors"] = False # NOTE: safetensors off
         elif model_path.endswith(".gguf"):
-            kwargs["quantization_config"] = GGUFQuantizationConfig(compute_dtype=self.torch_dtype)
+            kwargs["quantization_config"] = GGUFQuantizationConfig(compute_dtype=self.weight_dtype)
             kwargs["use_safetensors"] = False # NOTE: safetensors off
 
         if not is_checkpoint:
@@ -755,7 +763,7 @@ class CommonHost:
 
         self.log(f"ℹ️ Loading model: {model_path} with config: {str(config_path)}")
         kwargs = {}
-        kwargs["torch_dtype"] = self.torch_dtype
+        kwargs["torch_dtype"] = self.weight_dtype
         kwargs["local_files_only"] = True
         kwargs["low_cpu_mem_usage"] = True
 
@@ -1184,7 +1192,7 @@ class CommonHost:
 
     def process_input_latent(self, latents):
         # NOTE: this matters because it sometimes becomes NaN if you just move it to the target device
-        latents = latents.to(dtype=torch.float16, device=torch.device("cpu"))
+        latents = latents.to(dtype=self.weight_dtype, device=torch.device("cpu"))
         if hasattr(self.pipe, "unet"):
             latents = latents.to(device=self.pipe.unet.device)
         else:

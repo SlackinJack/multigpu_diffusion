@@ -165,7 +165,7 @@ def __generate_image_parallel(data):
 
     data = base.prepare_inputs(data)
 
-    with torch.no_grad():
+    with torch.inference_mode():
         __move_pipe(f"cuda:{base.applied.get("backend_config").get("device_id")}")
         torch.cuda.reset_peak_memory_stats()
 
@@ -173,9 +173,9 @@ def __generate_image_parallel(data):
         kwargs = base.setup_inference(data, can_use_compel=True)
 
         # inference
-        can_use_deep_cache = base.pipeline_type in ["sd1", "sd2", "sdxl"] and args.deep_cache == True
+        can_use_deep_cache = base.can_use_deepcache and args.deep_cache == True
         can_use_cache_dit = base.can_use_cachedit and args.cache_dit == True
-        with torch.inference_mode():
+        with torch.autocast(device_type="cuda", dtype=base.infer_dtype):
             if can_use_deep_cache:
                 helper = DeepCacheSDHelper(pipe=base.pipe)
                 helper.set_params(cache_interval=args.deep_cache_interval, cache_branch_id=args.deep_cache_id)

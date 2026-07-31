@@ -74,6 +74,7 @@ def __run_host():
             dist.broadcast_object_list(params, src=0)
             if params[0].get("stop") is not None:
                 base.log("🛑 Received exit signal - shutting down", rank_0_only=False)
+                __close_host()
                 return
             elif params[0].get("sleep") is not None and params[0].get("time") is not None:
                 t = params[0].get("time")
@@ -88,6 +89,7 @@ def __run_host():
 
 @app.route("/<path>", methods=["GET", "POST"])
 def handle_path(path):
+    global base, dist
     match path:
         # status
         case "initialize":
@@ -109,12 +111,22 @@ def handle_path(path):
         case "close":
             base.log("🛑 Received exit signal - shutting down", rank_0_only=False)
             dist.broadcast_object_list([{"stop": True}], src=0)
+            __close_host()
+            dist.destroy_process_group()
+            dist = None
             base.close_pipeline()
+            base = None
             os.kill(os.getpid(), signal.SIGTERM)
             raise HostShutdown
 
         case _:
             return "", 404
+
+
+def __close_host():
+    global args, async_diff, asyncdiff_config
+    args = async_diff = asyncdiff_config = None
+    return
 
 
 def __handle_request_parallel(data):
@@ -270,7 +282,7 @@ def __generate_image_parallel(data):
 
     data = base.prepare_inputs(data)
 
-    with torch.no_grad():
+    with torch.inference_mode():
         __move_pipe(f"cuda:{base.local_rank}")
         torch.cuda.reset_peak_memory_stats()
         warmup_steps = asyncdiff_config.get("synced_steps")
@@ -288,7 +300,7 @@ def __generate_image_parallel(data):
 
         # inference
         dist.barrier()
-        with torch.inference_mode():
+        with torch.autocast(device_type="cuda", dtype=base.infer_dtype):
             start_time = time.perf_counter()
             output = base.pipe(**kwargs)
             end_time = time.perf_counter()
