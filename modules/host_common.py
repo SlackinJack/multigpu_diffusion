@@ -330,7 +330,7 @@ class CommonHost:
             return "", 200
         else:
             try:
-                self.log(f"⚙️ Initializing pipeline", rank_0_only=False)
+                self.log(f"⏳ Initializing pipeline", rank_0_only=False)
 
                 # reset current
                 self.close_pipeline()
@@ -614,7 +614,7 @@ class CommonHost:
                             a = w if not "." in w else w.split(".")[0]
                             names.append(a)
                             self.pipe.load_lora_weights(weights, weight_name=w, adapter_name=a, local_files_only=True, low_cpu_mem_usage=True)
-                            self.log(f"✅ Added LoRA (scale={v}): {k}")
+                            self.log(f"ℹ️ Added LoRA (scale={v}): {k}")
 
                         target.set_adapters(names, list(data["lora"].values()))
                         loaded_adapters = target.active_adapters()
@@ -630,13 +630,13 @@ class CommonHost:
                 for k, v in self.pipe.components.items():
                     try:
                         self.pipe.components[k] = v.eval()
-                        self.log(f"✅ Set {str(k)} to eval mode")
+                        self.log(f"ℹ️ Set {str(k)} to eval mode")
                     except:
                         pass
 
                 if self.pipeline_type in ["sd1", "sd2", "sdxl"] and data["sd_fuse_qkv_projections"] == True:
                     self.pipe.fuse_qkv_projections()
-                    self.log("✅ Fused qkv projections")
+                    self.log("ℹ️ Fusing qkv projections")
 
                 if data["compile_config"] is not None:
                     compile_transformer     = data["compile_config"].get("compile_transformer")
