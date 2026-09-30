@@ -13,6 +13,7 @@ from diffusers import (
     ControlNetModel,
     GGUFQuantizationConfig,
     FluxTransformer2DModel,
+    Flux2Transformer2DModel,
     Krea2Transformer2DModel,
     MotionAdapter,
     PipelineQuantizationConfig,
@@ -27,6 +28,8 @@ from diffusers import (
     AnimateDiffControlNetPipeline,
     AnimateDiffPipeline,
     FluxControlNetPipeline,
+    Flux2KleinPipeline,
+    Flux2Pipeline,
     FluxPipeline,
     Krea2Pipeline,
     # Krea2ControlNetPipeline,
@@ -49,8 +52,8 @@ from diffusers.hooks import apply_group_offloading
 from diffusers.utils import load_image
 from diffusers.utils.torch_utils import randn_tensor
 from safetensors.torch import load_file
-from sdnq import SDNQConfig
-from sdnq.common import use_torch_compile as triton_is_available
+from sdnq import SDNQConfig, sdnq_post_load_quant
+from sdnq.loader import apply_sdnq_options_to_model
 from transformers import AutoModel as AutoModelT
 from transformers import BitsAndBytesConfig as BitsAndBytesConfigT
 from transformers import QuantoConfig as QuantoConfigT
@@ -124,36 +127,46 @@ def _get_tokenizer_module_names():
     return ["tokenizer", "tokenizer_2"]
 
 
-def get_quant_mapping(target, quantize_to):
+def get_quant_mapping(target, quantize_to, as_dict=False):
     out = {}
     config = None
 
-    backend = quantize_to.pop("backend")
+    quantize_config = copy.deepcopy(quantize_to)
+    backend = quantize_config.pop("backend")
     match backend:
         case "bitsandbytes":
-            load_in_8bit = quantize_to.get("load_in_8bit")
-            load_in_4bit = quantize_to.get("load_in_4bit")
+            load_in_8bit = quantize_config.get("load_in_8bit")
+            load_in_4bit = quantize_config.get("load_in_4bit")
             assert not (load_in_8bit == True and load_in_4bit == True), "Select either 4-bit or 8-bit quantization, but not both"
             c = {}
             if load_in_8bit == True:
-                for k,v in quantize_to.items():
+                for k,v in quantize_config.items():
                     if "4bit" in k: continue
                     c[k] = v
             elif load_in_4bit == True:
-                for k,v in quantize_to.items():
+                for k,v in quantize_config.items():
                     if "int8" in k: continue
                     if k in ["bnb_4bit_compute_dtype", "bnb_4bit_quant_storage"]: v = get_torch_type(v)
                     c[k] = v
             else:
                 return out
-            config = [BitsAndBytesConfigD(**c), BitsAndBytesConfigT(**c)]
+            if as_dict:
+                config = [{"bitsandbytes": c}] * 2
+            else:
+                config = [BitsAndBytesConfigD(**c), BitsAndBytesConfigT(**c)]
         case "quanto":
-            config = [QuantoConfigD(weights_dtype=quantize_to.get("quant_type")), QuantoConfigT(weights=quantize_to.get("quant_type"))]
+            if as_dict:
+                config = [{"quanto": {"weights_dtype": quantize_config.get("quant_type")}}]*2
+            else:
+                config = [QuantoConfigD(weights_dtype=quantize_config.get("quant_type")), QuantoConfigT(weights=quantize_config.get("quant_type"))]
         case "sdnq":
             # https://github.com/vladmandic/sdnext/wiki/SDNQ-Quantization
-            kwargs = { "weights_dtype": quantize_to.pop("quant_type") }
-            for k,v in quantize_to.items(): kwargs[k] = v
-            config = [SDNQConfig(**kwargs)] * 2
+            kwargs = {}
+            for k,v in quantize_config.items(): kwargs[k] = v
+            if as_dict:
+                config = [{"sdnq": kwargs}]*2
+            else:
+                config = [SDNQConfig(**kwargs)] * 2
 
     if config is not None:
         match target:
@@ -175,20 +188,23 @@ def get_quant_mapping(target, quantize_to):
     return out
 
 
-def get_quantization_config(quantization_config):
+def get_quantization_config(quantization_config, as_dict):
     mappings = {}
     quantize_transformer                    = quantization_config.get("transformer")
     quantize_encoder                        = quantization_config.get("encoder")
     quantize_vae                            = quantization_config.get("vae")
     quantize_tokenizer                      = quantization_config.get("tokenizer")
     quantize_misc                           = quantization_config.get("misc")
-    if quantize_transformer is not None:    mappings.update(get_quant_mapping("transformer", quantize_transformer))
-    if quantize_encoder is not None:        mappings.update(get_quant_mapping("encoder", quantize_encoder))
-    if quantize_vae is not None:            mappings.update(get_quant_mapping("vae", quantize_vae))
-    if quantize_tokenizer is not None:      mappings.update(get_quant_mapping("tokenizer", quantize_tokenizer))
-    if quantize_misc is not None:           mappings.update(get_quant_mapping("misc", quantize_misc))
+    if quantize_transformer is not None:    mappings.update(get_quant_mapping("transformer", quantize_transformer, as_dict=as_dict))
+    if quantize_encoder is not None:        mappings.update(get_quant_mapping("encoder", quantize_encoder, as_dict=as_dict))
+    if quantize_vae is not None:            mappings.update(get_quant_mapping("vae", quantize_vae, as_dict=as_dict))
+    if quantize_tokenizer is not None:      mappings.update(get_quant_mapping("tokenizer", quantize_tokenizer, as_dict=as_dict))
+    if quantize_misc is not None:           mappings.update(get_quant_mapping("misc", quantize_misc, as_dict=as_dict))
     if len(list(mappings.keys())) > 0:
-        return PipelineQuantizationConfig(quant_mapping=mappings)
+        if as_dict:
+            return mappings
+        else:
+            return PipelineQuantizationConfig(quant_mapping=mappings)
 
 
 class CommonHost:
@@ -201,7 +217,9 @@ class CommonHost:
         self.progress = 0
         self.pipe = None
         self.pipeline_type = None
+        self.backend_name = None
         self.logger = None
+        self.log_level = 2
         self.default_scheduler = None
         self.adapter_names = None
         self.applied = None
@@ -236,10 +254,11 @@ class CommonHost:
         return
 
 
-    def log(self, text, rank_0_only=True):
-        if rank_0_only == True and self.local_rank != 0: return
-        self.logger.info(text)
-        # print(f"[Rank {str(self.local_rank)}]: {text}")
+    def log(self, level, text, rank_0_only=True):
+        if rank_0_only == True and self.local_rank > 0: return
+        if self.log_level >= level:
+            self.logger.info(text)
+            # print(f"[Rank {str(self.local_rank)}]: {text}")
         return
 
 
@@ -250,6 +269,8 @@ class CommonHost:
     def close_pipeline(self):
         # TODO: fix this method to properly free up resources
         if self.pipe is not None:
+            if self.backend_name in ["balanced"]:
+                self.pipe.reset_device_map()
             self.pipe.to("cpu")
 
         # self.local_rank = -1
@@ -260,7 +281,9 @@ class CommonHost:
         self.progress = 0
         self.pipe = None
         self.pipeline_type = None
+        self.backend_name = None
         # self.logger = None
+        self.log_level = 2
         self.default_scheduler = None
         self.adapter_names = None
         self.applied = None
@@ -308,13 +331,31 @@ class CommonHost:
         data["xformers_efficient"]          = data.setdefault("xformers_efficient")
         data["group_offload_config"]        = data.setdefault("group_offload_config")
         data["sd_fuse_qkv_projections"]     = data.setdefault("sd_fuse_qkv_projections")
+
         # compile
         data["compile_config"]              = data.setdefault("compile_config")
         data["torch_config"]                = data.setdefault("torch_config")
+
         # quantization
         data["quantization_config"]         = data.setdefault("quantization_config")
+
         # attention
         data["attn_backend_config"]         = data.setdefault("attn_backend_config")
+
+        # debug, misc
+        data["logging_level"]               = data.setdefault("logging_level")
+        if data["logging_level"] != None:
+            match data["logging_level"]:
+                case "basic":   self.log_level = 0
+                case "info":    self.log_level = 1
+                case "all":     self.log_level = 2
+                case 0:         self.log_level = 0
+                case 1:         self.log_level = 1
+                case 2:         self.log_level = 2
+                case "0":       self.log_level = 0
+                case "1":       self.log_level = 1
+                case "2":       self.log_level = 2
+                case _:         self.log_level = 2
 
         self.print_params(data)
 
@@ -330,13 +371,14 @@ class CommonHost:
             return "", 200
         else:
             try:
-                self.log(f"⏳ Initializing pipeline", rank_0_only=False)
+                self.log(0, f"⏳ Initializing pipeline", rank_0_only=False)
 
                 # reset current
                 self.close_pipeline()
 
                 # setup current
                 self.pipeline_type = data["pipeline_type"]
+                self.backend_name = backend_name
 
                 # torch tweaks
                 if data["torch_config"] is not None:
@@ -346,6 +388,8 @@ class CommonHost:
                     if cache_size_limit is not None:                torch._dynamo.config.cache_size_limit               = cache_size_limit
                     if accumulated_cache_size_limit is not None:    torch._dynamo.config.accumulated_cache_size_limit   = accumulated_cache_size_limit
                     if capture_scalar_outputs is not None:          torch._dynamo.config.capture_scalar_outputs         = capture_scalar_outputs
+                """
+                # TODO: these should be up to the user
                 torch.backends.cuda.sdp_kernel(enable_flash=True, enable_math=True, enable_mem_efficient=True, enable_cudnn=True)
                 torch._inductor.config.conv_1x1_as_mm = True
                 torch._inductor.config.coordinate_descent_tuning = True
@@ -358,6 +402,7 @@ class CommonHost:
                     torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = False
                     torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = False
                     torch.backends.cuda.allow_fp16_bf16_reduction_math_sdp(False)
+                """
 
                 # update globals
                 self.vae_dtype      = torch.float16 if data["vae_fp16"] == True else None
@@ -370,18 +415,20 @@ class CommonHost:
                 kwargs["local_files_only"] = True
                 kwargs["low_cpu_mem_usage"] = True
                 kwargs["add_watermarker"] = False
-                match backend_name:
+                match self.backend_name:
                     case "balanced":
                         kwargs["device_map"] = "balanced"
 
                 # quantize
                 if data["quantization_config"] is not None:
-                    kwargs["quantization_config"] = get_quantization_config(data["quantization_config"])
+                    kwargs["quantization_config"] = get_quantization_config(data["quantization_config"], False)
 
                 # set transformer
                 if data["transformer"] is not None:
                     match self.pipeline_type:
-                        case "flux":    kwargs["transformer"] = self.load_model(data["transformer"], "FluxTransformer2DModel")
+                        case "flux1":    kwargs["transformer"] = self.load_model(data["transformer"], "FluxTransformer2DModel")
+                        case "flux2d":    kwargs["transformer"] = self.load_model(data["transformer"], "Flux2Transformer2DModel")
+                        case "flux2k":    kwargs["transformer"] = self.load_model(data["transformer"], "Flux2Transformer2DModel")
                         case "krea2":   kwargs["transformer"] = self.load_model(data["transformer"], "Krea2Transformer2DModel")
                         case "sd3":     kwargs["transformer"] = self.load_model(data["transformer"], "SD3Transformer2DModel")
                         case "zimage":  kwargs["transformer"] = self.load_model(data["transformer"], "ZImageTransformer2DModel")
@@ -431,10 +478,20 @@ class CommonHost:
                         PipelineClass = AnimateDiffControlNetPipeline if data["control_net"] is not None else AnimateDiffPipeline
                         self.is_image_model = False
                         self.can_use_deepcache = True # TODO: test
-                    case "flux":
+                    case "flux1":
                         PipelineClass = FluxControlNetPipeline if data["control_net"] is not None else FluxPipeline
                         self.is_transformer_model_type = True
                         self.can_use_cachedit = True
+                    case "flux2d":
+                        # PipelineClass = FluxControlNetPipeline if data["control_net"] is not None else FluxPipeline
+                        PipelineClass = Flux2Pipeline
+                        self.is_transformer_model_type = True
+                        # self.can_use_cachedit = True
+                    case "flux2k":
+                        # PipelineClass = FluxControlNetPipeline if data["control_net"] is not None else FluxPipeline
+                        PipelineClass = Flux2KleinPipeline
+                        self.is_transformer_model_type = True
+                        # self.can_use_cachedit = True
                     case "krea2":
                         # PipelineClass = Krea2ControlNetPipeline if data["control_net"] is not None else Krea2Pipeline
                         PipelineClass = Krea2Pipeline
@@ -482,13 +539,13 @@ class CommonHost:
                 if data["attn_backend_config"] is not None and data["attn_backend_config"].get("backend") is not None:
                     if self.is_transformer_model_type == True:  self.pipe.transformer.set_attention_backend(data["attn_backend_config"]["backend"])
                     else:                                       self.pipe.unet.set_attention_backend(data["attn_backend_config"]["backend"])
-                    self.log(f"ℹ️ Set attention backend to {data["attn_backend_config"]["backend"]}")
-                self.log("✅ Pipeline initialized", rank_0_only=False)
+                    self.log(0, f"ℹ️ Set attention backend to {data["attn_backend_config"]["backend"]}")
+                self.log(0, "✅ Pipeline initialized", rank_0_only=False)
                 self.progress = 50
 
                 # for debugging
                 if self.local_rank == 0:
-                    # self.log("\n\n\n" + str(self.pipe.transformer) + "\n\n\n")
+                    # self.log(0, "\n\n\n" + str(self.pipe.transformer) + "\n\n\n")
                     # raise ValueError
                     pass
 
@@ -524,18 +581,18 @@ class CommonHost:
                     if data["enable_vae_tiling"] == True:           self.pipe.vae.enable_tiling()
                     if data["enable_attention_slicing"] == True:    self.pipe.enable_attention_slicing()
                     if data["xformers_efficient"] == True:
-                        if self.pipeline_type not in ["flux", "krea2", "zimage"]:
+                        if self.pipeline_type not in ["flux1", "flux2d", "flux2k", "krea2", "zimage"]:
                             self.pipe.enable_xformers_memory_efficient_attention()  # NOTE: blocked because causes tensor size mismatches
                         else:
-                            self.log("⚠️ xformers not supported for this pipeline - ignoring")
+                            self.log(0, "⚠️ xformers not supported for this pipeline - ignoring")
                 self.progress = 70
 
                 # group offloading
                 if data["group_offload_config"] is None:
                     pass
                 else:
-                    if backend_name in ["balanced"]:
-                        self.log("❌ Group offloading not supported for this host - ignoring")
+                    if self.backend_name in ["balanced"]:
+                        self.log(0, "❌ Group offloading not supported for this host - ignoring")
                     else:
                         transformer_offload_config = data["group_offload_config"].get("transformer")
                         encoder_offload_config = data["group_offload_config"].get("encoder")
@@ -607,21 +664,21 @@ class CommonHost:
                     if target is not None:
                         names = []
                         for k, v in data["lora"].items():
-                            self.log(f"⏳ Loading lora: {k}")
+                            self.log(1, f"⏳ Loading lora: {k}")
                             if k.endswith(".safetensors") or k.endswith(".sft"):    weights = safetensors.torch.load_file(k, device=f'cuda:{self.local_rank}')
                             else:                                                   weights = torch.load(k, map_location=torch.device(f'cuda:{self.local_rank}'))
                             w = k.split("/")[-1]
                             a = w if not "." in w else w.split(".")[0]
                             names.append(a)
                             self.pipe.load_lora_weights(weights, weight_name=w, adapter_name=a, local_files_only=True, low_cpu_mem_usage=True)
-                            self.log(f"ℹ️ Added LoRA (scale={v}): {k}")
+                            self.log(0, f"ℹ️ Added LoRA (scale={v}): {k}")
 
                         target.set_adapters(names, list(data["lora"].values()))
                         loaded_adapters = target.active_adapters()
                         loaded_adapters_string = ""
                         for la in loaded_adapters: loaded_adapters_string += "\n        " + la
-                        self.log(f"📟 Total loaded LoRAs: {len(loaded_adapters)}")
-                        self.log(f"📚 Adapters: {loaded_adapters_string}")
+                        self.log(0, f"📟 Total loaded LoRAs: {len(loaded_adapters)}")
+                        self.log(1, f"📚 Adapters: {loaded_adapters_string}")
                         if len(names) > 0:  self.adapter_names = names
                         else:               self.adapter_names = None
                 self.progress = 90
@@ -630,13 +687,13 @@ class CommonHost:
                 for k, v in self.pipe.components.items():
                     try:
                         self.pipe.components[k] = v.eval()
-                        self.log(f"ℹ️ Set {str(k)} to eval mode")
+                        self.log(2, f"ℹ️ Set {str(k)} to eval mode")
                     except:
                         pass
 
                 if self.pipeline_type in ["sd1", "sd2", "sdxl"] and data["sd_fuse_qkv_projections"] == True:
                     self.pipe.fuse_qkv_projections()
-                    self.log("ℹ️ Fusing qkv projections")
+                    self.log(0, "ℹ️ Fusing qkv projections")
 
                 if data["compile_config"] is not None:
                     compile_transformer     = data["compile_config"].get("compile_transformer")
@@ -652,13 +709,13 @@ class CommonHost:
                         try:
                             compile_options = json.loads(compile_options)
                         except:
-                            self.log("⚠️ Invalid JSON for compile_options - ignoring compile_options")
+                            self.log(0, "⚠️ Invalid JSON for compile_options - ignoring compile_options")
                             compile_options = None
                     else:
                         compile_options = None
 
                     if compile_mode is not None and compile_options is not None:
-                        self.log("⚠️ compile_mode and compile_options are both defined - will ignore compile_mode")
+                        self.log(0, "⚠️ compile_mode and compile_options are both defined - will ignore compile_mode")
                         compile_mode = None
 
                     compiler_config                             = {}
@@ -680,14 +737,17 @@ class CommonHost:
                 clean()
 
                 # complete
-                self.log("✅ Model initialization completed", rank_0_only=False)
+                self.log(0, "✅ Model initialization completed", rank_0_only=False)
                 self.print_mem_usage()
+                if self.backend_name in ["balanced"]:
+                    self.log(2, f"ℹ️ Device map: {str(self.pipe.hf_device_map)}")
+                elif self.backend_name in ["single"]:
+                    self.pipe.to("cuda")
                 self.applied = data
                 self.progress = 100
-
                 return "", 200
             except:
-                self.log(traceback.format_exc(), rank_0_only=False)
+                self.log(0, traceback.format_exc(), rank_0_only=False)
                 return "", 500
 
 
@@ -702,7 +762,8 @@ class CommonHost:
             config_path = model_dict.get("config")
             assert config_path is not None, "You must provide a config_path when loading from a single file"
 
-        self.log(f"ℹ️ Loading model: {model_path} with config: {str(config_path)}")
+        self.log(0, f"""ℹ️ Loading model: {model_path}
+        with config: {str(config_path)}""")
         kwargs = {}
         kwargs["torch_dtype"] = self.weight_dtype
         kwargs["use_safetensors"] = True
@@ -730,6 +791,9 @@ class CommonHost:
             case "FluxTransformer2DModel":
                 if is_checkpoint:   return FluxTransformer2DModel.from_pretrained(model_path, **kwargs)
                 else:               return FluxTransformer2DModel.from_single_file(model_path, **kwargs)
+            case "Flux2Transformer2DModel":
+                if is_checkpoint:   return Flux2Transformer2DModel.from_pretrained(model_path, **kwargs)
+                else:               return Flux2Transformer2DModel.from_single_file(model_path, **kwargs)
             case "Krea2Transformer2DModel":
                 if is_checkpoint:   return Krea2Transformer2DModel.from_pretrained(model_path, **kwargs)
                 else:               return Krea2Transformer2DModel.from_single_file(model_path, **kwargs)
@@ -761,7 +825,9 @@ class CommonHost:
             config_path = model_dict.get("config")
             assert config_path is not None, "You must provide a config_path when loading from a single file"
 
-        self.log(f"ℹ️ Loading model: {model_path} with config: {str(config_path)}")
+        self.log(0, f"""ℹ️ Loading model: {model_path}
+        with config: {str(config_path)}""")
+
         kwargs = {}
         kwargs["torch_dtype"] = self.weight_dtype
         kwargs["local_files_only"] = True
@@ -817,51 +883,54 @@ class CommonHost:
                 if hasattr(self.pipe, "image_encoder") and self.pipe.image_encoder is not None:
                     self.pipe.image_encoder = torch.compile(self.pipe.image_encoder, **compile_config)
             case _:
-                self.log("❌ Unknown compile target - not compiling")
+                self.log(0, "❌ Unknown compile target - not compiling")
                 return
-        self.log(f"⚙️ {target} will be compiled")
+        self.log(0, f"⚙️ {target} will be compiled")
         return
 
 
     def print_params(self, data):
-        formatted = "📋 Received parameters:"
-        for k, v in data.items():
-            sv = str(v)
-            if v is None or len(sv) == 0:
-                continue
-            elif torch.is_tensor(v):
-                formatted += f'\n        {k}: {str(v is not None)}'
-            else:
-                if sv.startswith("{") and sv.endswith("}"):
-                    try:
-                        sv = format_json(v, indent=8, indent_all=True)
-                        formatted += f'\n        {k}: {sv}'
-                    except:
-                        formatted += f'\n        {k}: {str(v is not None)}'
+        if self.log_level >= 2:
+            formatted = "📋 Received parameters:"
+            for k, v in data.items():
+                sv = str(v)
+                if v is None or len(sv) == 0:
+                    continue
+                elif torch.is_tensor(v):
+                    formatted += f'\n        {k}: {str(v is not None)}'
                 else:
-                    if len(sv) < 128:
-                        formatted += f'\n        {k}: {sv}'
+                    if sv.startswith("{") and sv.endswith("}"):
+                        try:
+                            sv = format_json(v, indent=8, indent_all=True)
+                            formatted += f'\n        {k}: {sv}'
+                        except:
+                            formatted += f'\n        {k}: {str(v is not None)}'
                     else:
-                        formatted += f'\n        {k}: {str(v is not None)}'
-        self.log(formatted)
+                        if len(sv) < 128:
+                            formatted += f'\n        {k}: {sv}'
+                        else:
+                            formatted += f'\n        {k}: {str(v is not None)}'
+            self.log(2, formatted)
         return
 
 
     def print_timesteps(self, timesteps):
-        t_string = str(timesteps)
-        formatted = "👣 Timesteps:"
-        for t in t_string.split("\n"):
-            formatted += f'\n        {t}'
-        self.log(formatted)
+        if self.log_level >= 1:
+            t_string = str(timesteps)
+            formatted = "👣 Timesteps:"
+            for t in t_string.split("\n"):
+                formatted += f'\n        {t}'
+            self.log(1, formatted)
         return
 
 
     def print_sigmas(self, timesteps):
-        t_string = str(timesteps)
-        formatted = "📊 Sigmas:"
-        for t in t_string.split("\n"):
-            formatted += f'\n        {t}'
-        self.log(formatted)
+        if self.log_level >= 1:
+            t_string = str(timesteps)
+            formatted = "📊 Sigmas:"
+            for t in t_string.split("\n"):
+                formatted += f'\n        {t}'
+            self.log(1, formatted)
         return
 
 
@@ -926,7 +995,7 @@ class CommonHost:
             try:    mem = round(v.get_memory_footprint() / 1024 / 1024, 1)
             except: mem = "?"
             mem_usage_string += f"\n        {k}: {mem} MB"
-        self.log(f"{mem_usage_string}")
+        self.log(2, f"{mem_usage_string}")
         return
 
 
@@ -958,13 +1027,13 @@ class CommonHost:
             custom_timesteps = data["scheduler"].pop("timesteps", None)
             custom_sigmas = data["scheduler"].pop("sigmas", None)
             self.set_scheduler(data["scheduler"])
-            self.log(f"ℹ️ Set scheduler to {get_scheduler_name(self.pipe.scheduler)}")
+            self.log(0, f"ℹ️ Set scheduler to {get_scheduler_name(self.pipe.scheduler)}")
             if custom_timesteps is not None and custom_sigmas is not None:
-                self.log(f"⚠️ Both timesteps and sigmas were provided! Only one is allowed - using timesteps.")
+                self.log(0, f"⚠️ Both timesteps and sigmas were provided! Only one is allowed - using timesteps.")
                 custom_sigmas = None
         elif self.pipe.scheduler != self.default_scheduler:
             self.pipe.scheduler = copy.deepcopy(self.default_scheduler)
-            self.log(f"ℹ️ Reverted scheduler to {get_scheduler_name(self.pipe.scheduler)}")
+            self.log(0, f"ℹ️ Reverted scheduler to {get_scheduler_name(self.pipe.scheduler)}")
 
         if data["denoising_start"] is not None and data["denoising_start"] > 0:
             if self.pipeline_type in DENOISING_START_WORKAROUND_PIPELINES:
@@ -996,7 +1065,7 @@ class CommonHost:
             global DENOISING_START_WORKAROUND_PIPELINES
             nonlocal self, callbacks, data
             if torch.any(callback_kwargs["latents"].isnan()):
-                self.log("⁉️ NaN detected in latents - stopping generation", rank_0_only=False)
+                self.log(0, "⁉️ NaN detected in latents - stopping generation", rank_0_only=False)
                 self.pipe._interrupt = True
                 self.progress = 100
                 return callback_kwargs
@@ -1011,7 +1080,7 @@ class CommonHost:
             # denoising_start workaround
             if data["latent"] is not None and self.pipeline_type in DENOISING_START_WORKAROUND_PIPELINES:
                 if the_index == data["denoising_start"]:
-                    self.log(f"ℹ️ Injecting latent at step {str(the_index)}", rank_0_only=False)
+                    self.log(0, f"ℹ️ Injecting latent at step {str(the_index)}", rank_0_only=False)
                     callback_kwargs["latents"] = data["latent"]
                 elif the_index < data["denoising_start"]:
                     callback_kwargs["latents"] = torch.zeros_like(data["latent"])
@@ -1026,7 +1095,7 @@ class CommonHost:
             # denoising_end
             # if data["denoising_end"] is not None and the_index + 1 > data["denoising_end"]:
             if the_index + 1 > end:
-                self.log("ℹ️ Denoising end reached - stopping generation", rank_0_only=False)
+                self.log(0, "ℹ️ Denoising end reached - stopping generation", rank_0_only=False)
                 self.pipe._interrupt = True
 
             #self.progress = int((the_index + 1 + data["denoising_start"]) / min(data["steps"], data["denoising_end"] if data["denoising_end"] is not None else 2 ** 32 - 1) * 100)
@@ -1062,11 +1131,12 @@ class CommonHost:
                 data["negative_embeds"]             = data["negative_embeds"][0][0]
 
         if data["positive_embeds"] is not None and data["negative_embeds"] is not None:
-            dim_1 = max(data["positive_embeds"].size(1), data["negative_embeds"].size(1))
-            pad_pos = max(0, dim_1 - data["positive_embeds"].size(1))
-            pad_neg = max(0, dim_1 - data["negative_embeds"].size(1))
-            if pad_pos > 0: data["positive_embeds"] = F.pad(data["positive_embeds"], (0, 0, 0, pad_pos))
-            if pad_neg > 0: data["negative_embeds"] = F.pad(data["negative_embeds"], (0, 0, 0, pad_neg))
+            if self.pipeline_type not in ["zimage"]:
+                dim_1 = max(data["positive_embeds"].size(1), data["negative_embeds"].size(1))
+                pad_pos = max(0, dim_1 - data["positive_embeds"].size(1))
+                pad_neg = max(0, dim_1 - data["negative_embeds"].size(1))
+                if pad_pos > 0: data["positive_embeds"] = F.pad(data["positive_embeds"], (0, 0, 0, pad_pos))
+                if pad_neg > 0: data["negative_embeds"] = F.pad(data["negative_embeds"], (0, 0, 0, pad_neg))
 
         # set pipe
         kwargs                                                  = {}
@@ -1102,19 +1172,39 @@ class CommonHost:
                 if data["image"] is not None:                   kwargs["image"]                 = data["image"]
                 if data["height"] is not None:                  kwargs["height"]                = data["height"]
                 if data["width"] is not None:                   kwargs["width"]                 = data["width"]
-            case "flux": # TODO: complete
+            case "flux1": # TODO: complete
                 kwargs["output_type"]                           = "latent"
                 kwargs["guidance_scale"]                        = data["cfg"]
                 if data["height"] is not None:                  kwargs["height"]                = data["height"]
                 if data["width"] is not None:                   kwargs["width"]                 = data["width"]
                 if data["positive"] is not None:                kwargs["prompt"]                = data["positive"]
                 if data["negative"] is not None:                kwargs["negative_prompt"]       = data["negative"]
-                if data["positive_embeds"] is not None:
-                    kwargs["pooled_prompt_embeds"]              = data["positive_embeds"][0][1]["pooled_output"]
-                    kwargs["prompt_embeds"]                     = data["positive_embeds"][0][0]
-                if data["negative_embeds"] is not None:
-                    kwargs["negative_pooled_prompt_embeds"]     = data["negative_embeds"][0][1]["pooled_output"]
-                    kwargs["negative_prompt_embeds"]            = data["negative_embeds"][0][0]
+                if data["positive_embeds"] is not None:         kwargs["prompt_embeds"]                 = data["positive_embeds"]
+                if data["positive_pooled_embeds"] is not None:  kwargs["pooled_prompt_embeds"]          = data["positive_pooled_embeds"]
+                if data["negative_embeds"] is not None:         kwargs["negative_prompt_embeds"]        = data["negative_embeds"]
+                if data["negative_pooled_embeds"] is not None:  kwargs["negative_pooled_prompt_embeds"] = data["negative_pooled_embeds"]
+            case "flux2d": # TODO: complete
+                kwargs["output_type"]                           = "latent"
+                kwargs["guidance_scale"]                        = data["cfg"]
+                if data["height"] is not None:                  kwargs["height"]                = data["height"]
+                if data["width"] is not None:                   kwargs["width"]                 = data["width"]
+                if data["positive"] is not None:                kwargs["prompt"]                = data["positive"]
+                # if data["negative"] is not None:                kwargs["negative_prompt"]       = data["negative"]
+                if data["positive_embeds"] is not None:         kwargs["prompt_embeds"]                 = data["positive_embeds"]
+                # if data["positive_pooled_embeds"] is not None:  kwargs["pooled_prompt_embeds"]          = data["positive_pooled_embeds"]
+                # if data["negative_embeds"] is not None:         kwargs["negative_prompt_embeds"]        = data["negative_embeds"]
+                # if data["negative_pooled_embeds"] is not None:  kwargs["negative_pooled_prompt_embeds"] = data["negative_pooled_embeds"]
+            case "flux2k": # TODO: complete
+                kwargs["output_type"]                           = "latent"
+                kwargs["guidance_scale"]                        = data["cfg"]
+                if data["height"] is not None:                  kwargs["height"]                = data["height"]
+                if data["width"] is not None:                   kwargs["width"]                 = data["width"]
+                if data["positive"] is not None:                kwargs["prompt"]                = data["positive"]
+                # if data["negative"] is not None:                kwargs["negative_prompt"]       = data["negative"]
+                if data["positive_embeds"] is not None:         kwargs["prompt_embeds"]                 = data["positive_embeds"]
+                # if data["positive_pooled_embeds"] is not None:  kwargs["pooled_prompt_embeds"]          = data["positive_pooled_embeds"]
+                if data["negative_embeds"] is not None:         kwargs["negative_prompt_embeds"]        = data["negative_embeds"]
+                # if data["negative_pooled_embeds"] is not None:  kwargs["negative_pooled_prompt_embeds"] = data["negative_pooled_embeds"]
             case "want2v": # TODO: complete
                 kwargs["output_type"]                           = "pil"
                 kwargs["guidance_scale"]                        = data["cfg"]
@@ -1139,12 +1229,10 @@ class CommonHost:
                 if data["width"] is not None:                   kwargs["width"]                 = data["width"]
                 if data["positive"] is not None:                kwargs["prompt"]                = data["positive"]
                 if data["negative"] is not None:                kwargs["negative_prompt"]       = data["negative"]
-                if data["positive_embeds"] is not None:
-                    kwargs["pooled_prompt_embeds"]              = data["positive_embeds"][0][1]["pooled_output"]
-                    kwargs["prompt_embeds"]                     = data["positive_embeds"][0][0]
-                if data["negative_embeds"] is not None:
-                    kwargs["negative_pooled_prompt_embeds"]            = data["negative_embeds"][0][1]["pooled_output"]
-                    kwargs["negative_prompt_embeds"]                   = data["negative_embeds"][0][0]
+                if data["positive_embeds"] is not None:         kwargs["prompt_embeds"]                 = data["positive_embeds"]
+                if data["positive_pooled_embeds"] is not None:  kwargs["pooled_prompt_embeds"]          = data["positive_pooled_embeds"]
+                if data["negative_embeds"] is not None:         kwargs["negative_prompt_embeds"]        = data["negative_embeds"]
+                if data["negative_pooled_embeds"] is not None:  kwargs["negative_pooled_prompt_embeds"] = data["negative_pooled_embeds"]
             case "zimage": # TODO: complete
                 kwargs["output_type"]                           = "latent"
                 kwargs["guidance_scale"]                        = data["cfg"]
@@ -1152,12 +1240,10 @@ class CommonHost:
                 if data["width"] is not None:                   kwargs["width"]                 = data["width"]
                 if data["positive"] is not None:                kwargs["prompt"]                = data["positive"]
                 if data["negative"] is not None:                kwargs["negative_prompt"]       = data["negative"]
-                if data["positive_embeds"] is not None:
-                    kwargs["pooled_prompt_embeds"]              = data["positive_embeds"][0][1]["pooled_output"]
-                    kwargs["prompt_embeds"]                     = data["positive_embeds"][0][0]
-                if data["negative_embeds"] is not None:
-                    kwargs["negative_pooled_prompt_embeds"]            = data["negative_embeds"][0][1]["pooled_output"]
-                    kwargs["negative_prompt_embeds"]                   = data["negative_embeds"][0][0]
+                if data["positive_embeds"] is not None:         kwargs["prompt_embeds"]                 = data["positive_embeds"]
+                if data["positive_pooled_embeds"] is not None:  kwargs["pooled_prompt_embeds"]          = data["positive_pooled_embeds"]
+                if data["negative_embeds"] is not None:         kwargs["negative_prompt_embeds"]        = data["negative_embeds"]
+                if data["negative_pooled_embeds"] is not None:  kwargs["negative_pooled_prompt_embeds"] = data["negative_pooled_embeds"]
             case _: # NOTE: "sd1", "sd2", "sd3", "sdxl"
                 kwargs["output_type"]                           = "latent"
                 kwargs["guidance_scale"]                        = data["cfg"]
@@ -1218,7 +1304,8 @@ class CommonHost:
             latents = latents / latents_std + latents_mean
             latents = self.pipe.vae.decode(latents, return_dict=False)[0][:, :, 0]
         else:
-            latents = latents / self.pipe.vae.config.scaling_factor
+            if self.pipeline_type not in ["flux2d", "flux2k"]:
+                latents = latents / self.pipe.vae.config.scaling_factor
             latents = self.pipe.vae.decode(latents, return_dict=False)[0]
         latents = self.pipe.image_processor.postprocess(latents, output_type="pil")
         if self.vae_dtype is not None:
@@ -1234,3 +1321,11 @@ class CommonHost:
     def convert_latent_to_image(self, latents):
         latents = self.process_latent_for_output(latents, False)
         return latents
+
+    
+    def get_output_images(self, output_images):
+        if self.pipeline_type in ["flux1"]:
+            output_images = self.pipe._unpack_latents(output_images, data["height"], data["width"], self.pipe.vae_scale_factor)
+        elif self.pipeline_type in ["krea2"]:
+            output_images = self.pipe._unpack_latents(output_images, data["height"], data["width"])
+        return output_images

@@ -16,6 +16,14 @@ Python Flask hosts for multi-GPU Diffusion inferencing solutions.
 - To interact with the hosts, GET/POST to localhost:{port}/{endpoint}. You can find the endpoints at each host's handle_path().
 
 
+## Hosts:
+| Host Name | Description                                                                       |
+|    ---    |     ---                                                                           |
+| AsyncDiff | Accelerates inference by caching individual model components across GPUs.         |
+| Balanced  | Splits pipeline components so that they fit into VRAM (device_map="balanced").    |
+|  Single   | Inference on a single GPU. Set the device via cuda_visible_devices.               |
+
+
 ## Additional Resources:
 - [AsyncDiff](https://github.com/czg1225/AsyncDiff)
 

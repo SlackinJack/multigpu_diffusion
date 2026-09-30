@@ -11,7 +11,8 @@ from flask import Flask, request, jsonify
 
 
 from AsyncDiff.asyncdiff.async_animate import AsyncDiff as AsyncDiffAnimateDiff
-from AsyncDiff.asyncdiff.async_flux import AsyncDiff as AsyncDiffFlux
+from AsyncDiff.asyncdiff.async_flux1 import AsyncDiff as AsyncDiffFlux1
+from AsyncDiff.asyncdiff.async_flux2 import AsyncDiff as AsyncDiffFlux2
 from AsyncDiff.asyncdiff.async_krea2 import AsyncDiff as AsyncDiffKrea2
 from AsyncDiff.asyncdiff.async_sd import AsyncDiff as AsyncDiffStableDiffusion
 from AsyncDiff.asyncdiff.async_sd3 import AsyncDiff as AsyncDiffStableDiffusion3
@@ -24,10 +25,14 @@ from modules.scheduler_config import *
 from modules.utils import *
 
 
+logging.getLogger("werkzeug").setLevel(logging.CRITICAL)
+logging.getLogger("flask").setLevel(logging.CRITICAL)
+logging.getLogger("werkzeug").disabled = True
+logging.getLogger("flask").disabled = True
 app = Flask(__name__)
-async_diff = None
-asyncdiff_config = None
 base = None
+asyncdiff = None
+asyncdiff_config = None
 
 
 def __initialize_distributed_environment():
@@ -43,46 +48,34 @@ def __initialize_distributed_environment():
     return
 
 
-args = None
 def __run_host():
-    global args, base
-
+    global base
     parser = argparse.ArgumentParser()
-    # asyncdiff
-    parser.add_argument("--model_n",        type=int,   default=2) # NOTE: if n > 4, you'll need to manually map your model in pipe_config.py
-    parser.add_argument("--stride",         type=int,   default=1)
-    parser.add_argument("--synced_steps",   type=int,   default=3)
-    parser.add_argument("--time_shift",     type=int,   default=0)
-    parser.add_argument("--shifted_steps",  type=int,   default=0)
-    parser.add_argument("--cached_step",    type=int,   default=1)
-    parser.add_argument("--ramped_time_shift",          action="store_true")
-    # generic
     for k, v in GENERIC_HOST_ARGS.items():  parser.add_argument(f"--{k}", type=v, default=None)
     for e in GENERIC_HOST_ARGS_TOGGLES:     parser.add_argument(f"--{e}", action="store_true")
     args = parser.parse_args()
 
     torch._logging.set_logs(all=logging.CRITICAL)
     if base.local_rank == 0:
-        base.log("ℹ️ Starting Flask host on rank 0")
-        logging.getLogger('werkzeug').disabled = True
-        app.run(host="localhost", port=args.port)
+        base.log(1, "ℹ️ Starting Flask host on rank 0")
+        app.run(host="localhost", port=args.port, debug=False, use_reloader=False)
     else:
         while True:
-            base.log(f"⏳ Waiting for tasks", rank_0_only=False)
+            base.log(0, f"⏳ Waiting for tasks", rank_0_only=False)
             params = [{"stop": True}]
             # TODO: would be nice to make this non-blocking
             dist.broadcast_object_list(params, src=0)
             if params[0].get("stop") is not None:
-                base.log("🛑 Received exit signal - shutting down", rank_0_only=False)
+                base.log(0, "🛑 Received exit signal - shutting down", rank_0_only=False)
                 __close_host()
                 return
             elif params[0].get("sleep") is not None and params[0].get("time") is not None:
                 t = params[0].get("time")
-                base.log(f"💤 Received sleep signal - pausing for {t} seconds", rank_0_only=False)
+                base.log(0, f"💤 Received sleep signal - pausing for {t} seconds", rank_0_only=False)
                 time.sleep(int(t))
-                base.log("⏰ Sleep finished", rank_0_only=False)
+                base.log(0, "⏰ Sleep finished", rank_0_only=False)
             else:
-                base.log(f"📋 Received task", rank_0_only=False)
+                base.log(0, f"📋 Received task", rank_0_only=False)
                 __handle_request_parallel(*params)
     return
 
@@ -109,23 +102,23 @@ def handle_path(path):
         case "sleep":
             return __handle_sleep(request.json)
         case "close":
-            base.log("🛑 Received exit signal - shutting down", rank_0_only=False)
+            base.log(0, "🛑 Received exit signal - shutting down", rank_0_only=False)
             dist.broadcast_object_list([{"stop": True}], src=0)
             __close_host()
-            dist.destroy_process_group()
-            dist = None
-            base.close_pipeline()
-            base = None
-            os.kill(os.getpid(), signal.SIGTERM)
-            raise HostShutdown
-
+            # raise HostShutdown
+            return "", 200
         case _:
             return "", 404
 
 
 def __close_host():
-    global args, async_diff, asyncdiff_config
-    args = async_diff = asyncdiff_config = None
+    global asyncdiff, asyncdiff_config, base, dist
+    asyncdiff = asyncdiff_config = None
+    base.close_pipeline()
+    dist.barrier()
+    dist.destroy_process_group()
+    dist = None
+    os.kill(os.getpid(), signal.SIGTERM)
     return
 
 
@@ -230,12 +223,19 @@ def __move_pipe(device):
         Moved to {device}: {str(moved)}
         Not moved to {device}: {str(not_moved)}
         Already on {device}: {str(alr_moved)}"""
-    base.log(msg)
+    base.log(2, msg)
     return msg, 200
 
 
 def __apply_pipeline_parallel(data):
-    global async_diff, asyncdiff_config, base
+    global asyncdiff, asyncdiff_config, base
+    # Params:
+    # model_n
+    # stride
+    # synced_steps
+    # time_shift
+    # shifted_steps
+    # ramped_time_shift
     with torch.no_grad():
         result = base.setup_pipeline(data, backend_name="asyncdiff")
         if result[1] == 200:
@@ -244,8 +244,10 @@ def __apply_pipeline_parallel(data):
             asyncdiff_config = ad_config
             if base.pipeline_type in ["ad"]:
                 ad_class = AsyncDiffAnimateDiff
-            elif base.pipeline_type in ["flux"]:
-                ad_class = AsyncDiffFlux
+            elif base.pipeline_type in ["flux1"]:
+                ad_class = AsyncDiffFlux1
+            elif base.pipeline_type in ["flux2d", "flux2k"]:
+                ad_class = AsyncDiffFlux2
             elif base.pipeline_type in ["krea2"]:
                 ad_class = AsyncDiffKrea2
             elif base.pipeline_type in ["sd3"]:
@@ -256,45 +258,41 @@ def __apply_pipeline_parallel(data):
                 ad_class = AsyncDiffZImage
             else:
                 ad_class = AsyncDiffStableDiffusion
-            base.log(f"""ℹ️ Initializing AsyncDiff:
+            base.log(1, f"""ℹ️ Initializing AsyncDiff:
         model_n: {asyncdiff_config.get("model_n")}
         stride: {asyncdiff_config.get("stride")}
         synced_steps: {asyncdiff_config.get("synced_steps")}
         time_shift: {asyncdiff_config.get("time_shift")}
         shifted_steps: {asyncdiff_config.get("shifted_steps")}
-        cached_step: {asyncdiff_config.get("cached_step")}""")
-            async_diff = ad_class(
+        ramped_time_shift: {asyncdiff_config.get("ramped_time_shift")}""")
+            asyncdiff = ad_class(
                 base.pipe,
                 base.pipeline_type,
                 model_n=asyncdiff_config.get("model_n"),
                 stride=asyncdiff_config.get("stride"),
                 time_shift=asyncdiff_config.get("time_shift"),
                 shifted_steps=asyncdiff_config.get("shifted_steps"),
-                cached_step=asyncdiff_config.get("cached_step"),
             )
-            if asyncdiff_config.get("cached_step") is not None and asyncdiff_config.get("cached_step") > 1:
-                base.log("⚠️ cached_step enabled - this may severely degrade image quality if not tuned correctly")
         return result
 
 
 def __generate_image_parallel(data):
-    global async_diff, asyncdiff_config, base
-
+    global asyncdiff, asyncdiff_config, base
     data = base.prepare_inputs(data)
 
     with torch.inference_mode():
         __move_pipe(f"cuda:{base.local_rank}")
         torch.cuda.reset_peak_memory_stats()
         warmup_steps = asyncdiff_config.get("synced_steps")
-        # async_diff.reset_state(warm_up=warmup_steps)
+        # asyncdiff.reset_state(warm_up=warmup_steps)
 
         def complete(data, index, timestep, callback_kwargs):
-            base.log("🚀 AsyncDiff warmup completed")
+            base.log(0, "🚀 AsyncDiff warmup completed")
             return
 
         # inference kwargs
         callbacks = {}
-        async_diff.reset_state(warm_up=warmup_steps)
+        asyncdiff.reset_state(warm_up=warmup_steps)
         callbacks[warmup_steps] = complete
         kwargs = base.setup_inference(data, can_use_compel=True, callbacks=callbacks)
 
@@ -304,7 +302,7 @@ def __generate_image_parallel(data):
             start_time = time.perf_counter()
             output = base.pipe(**kwargs)
             end_time = time.perf_counter()
-            base.log(f"⏱️ Processing time: {end_time - start_time:0.3f}")
+            base.log(0, f"⏱️ Processing time: {end_time - start_time:0.3f}")
         dist.barrier()
 
         # clean up
@@ -318,10 +316,7 @@ def __generate_image_parallel(data):
                         output = output.images[0]
                     else:
                         output_images = output.images
-                        if base.pipeline_type in ["flux"]:
-                            output_images = base.pipe._unpack_latents(output_images, data["height"], data["width"], base.pipe.vae_scale_factor)
-                        elif base.pipeline_type in ["krea2"]:
-                            output_images = base.pipe._unpack_latents(output_images, data["height"], data["width"])
+                        output_images = base.get_output_images(output_images)
                         images = base.convert_latent_to_image(output_images)
                         latents = base.convert_latent_to_output_latent(output_images)
                         return { "message": "OK", "output": pickle_and_encode_b64(images[0]), "latent": pickle_and_encode_b64(latents), "is_image": True }
