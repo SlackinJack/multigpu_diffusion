@@ -9,6 +9,7 @@ import torch.nn.functional as F
 import traceback
 from diffusers import (
     AutoencoderKL,
+    AutoencoderKLFlux2,
     AutoModel,
     ControlNetModel,
     GGUFQuantizationConfig,
@@ -205,6 +206,17 @@ def get_quantization_config(quantization_config, as_dict):
             return mappings
         else:
             return PipelineQuantizationConfig(quant_mapping=mappings)
+
+
+def _get_device_map_memory():
+    reserved_percent = 0.12500
+    max_memory = {}
+    for i in range(torch.cuda.device_count()):
+        total = torch.cuda.mem_get_info(i)[1]
+        max_memory[i] = f"{total * (1 - reserved_percent)}GiB"
+    max_memory["cpu"] = "0GiB"
+    max_memory["disk"] = "0GiB"
+    return max_memory
 
 
 class CommonHost:
@@ -418,6 +430,7 @@ class CommonHost:
                 match self.backend_name:
                     case "balanced":
                         kwargs["device_map"] = "balanced"
+                        kwargs["max_memory"] = _get_device_map_memory()
 
                 # quantize
                 if data["quantization_config"] is not None:
@@ -436,8 +449,11 @@ class CommonHost:
                 self.progress = 10
 
                 # set vae
-                if data["vae"] is not None and self.pipeline_type not in ["ad", "svd"]:
-                    kwargs["vae"] = self.load_model(data["vae"], "AutoencoderKL")
+                if data["vae"] is not None:
+                    if self.pipeline_type in ["flux2d", "flux2k"]:
+                        kwargs["vae"] = self.load_model(data["vae"], "AutoencoderKLFlux2")
+                    elif self.pipeline_type not in ["ad", "svd"]:
+                        kwargs["vae"] = self.load_model(data["vae"], "AutoencoderKL")
                 self.progress = 20
 
                 # set text encoder(s)
@@ -740,6 +756,12 @@ class CommonHost:
                 self.log(0, "✅ Model initialization completed", rank_0_only=False)
                 self.print_mem_usage()
                 if self.backend_name in ["balanced"]:
+                    for k,v in self.pipe.components.items():
+                        try:
+                            if v.device in [torch.device("cpu"), torch.device("disk")]:
+                                setattr(self.pipe, k, v.to(torch.device(f"cuda:{self.pipe.hf_device_map.get(k)}")))
+                        except:
+                            pass
                     self.log(2, f"ℹ️ Device map: {str(self.pipe.hf_device_map)}")
                 elif self.backend_name in ["single"]:
                     self.pipe.to("cuda")
@@ -785,6 +807,11 @@ class CommonHost:
                     kwargs["torch_dtype"] = self.vae_dtype
                 if is_checkpoint:   return AutoencoderKL.from_pretrained(model_path, **kwargs)
                 else:               return AutoencoderKL.from_single_file(model_path, **kwargs)
+            case "AutoencoderKLFlux2":
+                if self.vae_dtype is not None:
+                    kwargs["torch_dtype"] = self.vae_dtype
+                if is_checkpoint:   return AutoencoderKLFlux2.from_pretrained(model_path, **kwargs)
+                else:               return AutoencoderKLFlux2.from_single_file(model_path, **kwargs)
             case "ControlNetModel":
                 if is_checkpoint:   return ControlNetModel.from_pretrained(model_path, **kwargs)
                 else:               return ControlNetModel.from_single_file(model_path, **kwargs)
@@ -1323,7 +1350,7 @@ class CommonHost:
         return latents
 
     
-    def get_output_images(self, output_images):
+    def get_output_images(self, output_images, data):
         if self.pipeline_type in ["flux1"]:
             output_images = self.pipe._unpack_latents(output_images, data["height"], data["width"], self.pipe.vae_scale_factor)
         elif self.pipeline_type in ["krea2"]:

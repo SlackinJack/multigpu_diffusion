@@ -28,7 +28,11 @@ Python Flask hosts for multi-GPU Diffusion inferencing solutions.
 - [AsyncDiff](https://github.com/czg1225/AsyncDiff)
 
 
+## Known Issues:
+- Running balanced host will create device errors, use another host for now.
+
+
 ## Test Environment:
 - 4x Nvidia Tesla T4
-- Ubuntu Server 26.04
 - Python 3.14.4
+- Torch 2.14.0

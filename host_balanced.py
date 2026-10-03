@@ -130,7 +130,7 @@ def __generate_image_parallel(data):
                     output = output.images[0]
                 else:
                     output_images = output.images
-                    output_images = base.get_output_images(output_images)
+                    output_images = base.get_output_images(output_images, data)
                     flag = base.pipe.vae.device == torch.device("cpu")
                     if flag: base.pipe.vae = base.pipe.vae.to(device=output_images.device)
                     images = base.convert_latent_to_image(output_images)
